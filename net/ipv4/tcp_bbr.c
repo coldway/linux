@@ -9,6 +9,8 @@
  *   pacing_rate = pacing_gain * bottleneck_bandwidth
  *   cwnd = max(cwnd_gain * bottleneck_bandwidth * min_rtt, 4)
  *
+ * pacing_rate和cwnd是整个算法最关键的核心所在，他们随着状态的变化而改变，并以此在实际上控制TCP的发包
+ *
  * The core algorithm does not react directly to packet losses or delays,
  * although BBR may adjust the size of next send per ACK when loss is
  * observed, or adjust the sending rate if it estimates there is a
@@ -76,6 +78,7 @@
 #define BBR_UNIT (1 << BBR_SCALE)
 
 /* BBR has the following modes for deciding how fast to send: */
+/* BBR四种标准状态 */
 enum bbr_mode {
 	BBR_STARTUP,	/* ramp up sending rate rapidly to fill pipe */
 	BBR_DRAIN,	/* drain any queue created during startup */
@@ -129,7 +132,9 @@ struct bbr {
 
 /* Window length of bw filter (in rounds): */
 static const int bbr_bw_rtts = CYCLE_LEN + 2;
-/* Window length of min_rtt filter (in sec): */
+/* Window length of min_rtt filter (in sec):
+ * 10s未更新最小RTT则进入PROBE_RTT
+ **/
 static const u32 bbr_min_rtt_win_sec = 10;
 /* Minimum time (in ms) spent at bbr_cwnd_min_target in BBR_PROBE_RTT mode: */
 static const u32 bbr_probe_rtt_mode_ms = 200;
@@ -148,6 +153,7 @@ static const int bbr_pacing_margin_percent = 1;
  * that will allow a smoothly increasing pacing rate that will double each RTT
  * and send the same number of packets per RTT that an un-paced, slow-starting
  * Reno or CUBIC flow would:
+ * 模拟cubic的增加曲线做出的增长系数，这里类似于慢增长算法
  */
 static const int bbr_high_gain  = BBR_UNIT * 2885 / 1000 + 1;
 /* The pacing gain of 1/high_gain in BBR_DRAIN is calculated to typically drain
@@ -202,6 +208,7 @@ static const u32 bbr_extra_acked_max_us = 100 * 1000;
 static void bbr_check_probe_rtt_done(struct sock *sk);
 
 /* Do we estimate that STARTUP filled the pipe? */
+/* 检测STARTUP阶段是否将pipe填满，如果填满，意味着将要exit startup阶段 */
 static bool bbr_full_bw_reached(const struct sock *sk)
 {
 	const struct bbr *bbr = inet_csk_ca(sk);
@@ -210,6 +217,7 @@ static bool bbr_full_bw_reached(const struct sock *sk)
 }
 
 /* Return the windowed max recent bandwidth sample, in pkts/uS << BW_SCALE. */
+/* 最大探测带宽 */
 static u32 bbr_max_bw(const struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
@@ -218,6 +226,7 @@ static u32 bbr_max_bw(const struct sock *sk)
 }
 
 /* Return the estimated bandwidth of the path, in pkts/uS << BW_SCALE. */
+/* 设置估计带宽为LT_bw或者最大探测带宽 */
 static u32 bbr_bw(const struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);

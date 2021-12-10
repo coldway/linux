@@ -595,7 +595,13 @@ static inline loff_t *file_ppos(struct file *file)
 
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
+    /*
+     * 传进来的是一个 int，现在要获取对应的 fd 结构
+     * 像是 stdin 是一个 fd，对应的是 0
+     */
 	struct fd f = fdget_pos(fd);
+    // EBADF : fd is not a valid file descriptor or is not open for reading.
+    // fd 不是有效的文件描述符，或者没有打开进行读取。
 	ssize_t ret = -EBADF;
 
 	if (f.file) {

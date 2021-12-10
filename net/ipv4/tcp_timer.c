@@ -779,6 +779,7 @@ void tcp_init_xmit_timers(struct sock *sk)
 				  &tcp_keepalive_timer);
 	hrtimer_init(&tcp_sk(sk)->pacing_timer, CLOCK_MONOTONIC,
 		     HRTIMER_MODE_ABS_PINNED_SOFT);
+	// 初始化一个高精度的pacing定时器
 	tcp_sk(sk)->pacing_timer.function = tcp_pace_kick;
 
 	hrtimer_init(&tcp_sk(sk)->compressed_ack_timer, CLOCK_MONOTONIC,

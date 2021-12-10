@@ -83,6 +83,7 @@ static inline struct file *__fcheck_files(struct files_struct *files, unsigned i
 {
 	struct fdtable *fdt = rcu_dereference_raw(files->fdt);
 
+    // 检查 fd 是不是超出了最大限制（max_fds -- 可以分配的最大文件描述符数）
 	if (fd < fdt->max_fds) {
 		fd = array_index_nospec(fd, fdt->max_fds);
 		return rcu_dereference_raw(fdt->fd[fd]);

@@ -71,10 +71,17 @@ static struct file_system_type anon_inode_fs_type = {
  * hence saving memory and avoiding code duplication for the file/inode/dentry
  * setup.  Returns the newly created file* or an error pointer.
  */
+/**
+ * 创建一个　file　结构，并将它与一个匿名　inode　节点　anon_inode_inode　挂钩在一起
+ * 使用anon_inode_getfile（）创建的所有文件对象将共享一个匿名inode，
+ * 因此节省了内存并避免了文件/inode/dentry的代码重复
+ */
 struct file *anon_inode_getfile(const char *name,
 				const struct file_operations *fops,
 				void *priv, int flags)
 {
+    //priv 就是前面的 eventpoll 结构
+
 	struct file *file;
 
 	if (IS_ERR(anon_inode_inode))
@@ -95,6 +102,10 @@ struct file *anon_inode_getfile(const char *name,
 
 	file->f_mapping = anon_inode_inode->i_mapping;
 
+    /*
+     * file->private_data会指向这个ep变量
+     * ep->file会指向该函数申请的file结构变量。
+     */
 	file->private_data = priv;
 
 	return file;

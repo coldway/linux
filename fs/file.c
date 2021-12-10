@@ -501,7 +501,7 @@ repeat:
 	error = -EMFILE;
 	if (fd >= end)
 		goto out;
-
+    //如果fd大于了fdt->max_fds 就需要file struct进行扩展
 	error = expand_files(files, fd);
 	if (error < 0)
 		goto out;
@@ -540,6 +540,13 @@ static int alloc_fd(unsigned start, unsigned flags)
 	return __alloc_fd(current->files, start, rlimit(RLIMIT_NOFILE), flags);
 }
 
+/*
+ * linux内核中，current是个宏，返回的是一个task_struct结构（我们称之为进程描述符）的变量，
+ * 表示的是当前进程，进程打开的文件资源保存在进程描述符的files成员里面，
+ * 所以current->files返回的当前进程打开的文件资源。
+ * rlimit(RLIMIT_NOFILE) 函数获取的是当前进程可以打开的最大文件描述符数，这个值可以设置，默认是1024。
+ * __alloc_fd的工作是为进程在[start,end)之间(备注：这里start为0， end为进程可以打开的最大文件描述符数)分配一个可用的文件描述符
+ */
 int __get_unused_fd_flags(unsigned flags, unsigned long nofile)
 {
 	return __alloc_fd(current->files, 0, nofile, flags);
@@ -718,8 +725,10 @@ static struct file *__fget_files(struct files_struct *files, unsigned int fd,
 {
 	struct file *file;
 
+    // 设置一个 rcu 读取锁
 	rcu_read_lock();
 loop:
+    // 循环去请求 file 结构
 	file = fcheck_files(files, fd);
 	if (file) {
 		/* File object ref couldn't be taken.
@@ -789,15 +798,18 @@ struct file *fget_task(struct task_struct *task, unsigned int fd)
  */
 static unsigned long __fget_light(unsigned int fd, fmode_t mask)
 {
+    // 获取当前进程的 files 结构（这个结构存储了打开的文件与进程交互的有关信息）
 	struct files_struct *files = current->files;
 	struct file *file;
 
+    // count -- 使用该表的进程数
 	if (atomic_read(&files->count) == 1) {
 		file = __fcheck_files(files, fd);
 		if (!file || unlikely(file->f_mode & mask))
 			return 0;
 		return (unsigned long)file;
 	} else {
+        // 跟多个进程共享 files 结构的时候
 		file = __fget(fd, mask, 1);
 		if (!file)
 			return 0;
@@ -817,9 +829,11 @@ unsigned long __fdget_raw(unsigned int fd)
 
 unsigned long __fdget_pos(unsigned int fd)
 {
+    // 获取 file 结构的地址
 	unsigned long v = __fdget(fd);
 	struct file *file = (struct file *)(v & ~3);
 
+    // 如果需要对 f_pos 进行原子访问
 	if (file && (file->f_mode & FMODE_ATOMIC_POS)) {
 		if (file_count(file) > 1) {
 			v |= FDPUT_POS_UNLOCK;

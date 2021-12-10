@@ -54,6 +54,7 @@ extern unsigned long __fdget_raw(unsigned int fd);
 extern unsigned long __fdget_pos(unsigned int fd);
 extern void __f_unlock_pos(struct file *);
 
+// 去掉 file 结构地址的 最低 2 bits 得到 fd 结构
 static inline struct fd __to_fd(unsigned long v)
 {
 	return (struct fd){(struct file *)(v & ~3),v & 3};

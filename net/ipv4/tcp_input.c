@@ -3310,6 +3310,12 @@ static void tcp_cong_control(struct sock *sk, u32 ack, u32 acked_sacked,
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
 	if (icsk->icsk_ca_ops->cong_control) {
+        // 如果是bbr，则完全被bbr接管，不管现在处在什么状态！
+        /* 目前而言，只有bbr使用了这个机制，但我相信，不久的将来，
+         * 会有越来越多的拥塞控制算法使用这个统一的完全接管机制！
+         * 就我个人而言，在几个月前就写过一个patch，接管了tcp_cwnd_reduction
+         * 这个prr的降窗过程。如果当时有了这个框架，我就有福了！
+         */
 		icsk->icsk_ca_ops->cong_control(sk, rs);
 		return;
 	}
