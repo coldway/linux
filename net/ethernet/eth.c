@@ -158,12 +158,16 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	const unsigned short *sap;
 	const struct ethhdr *eth;
 
+    // 输入数据包中，该字段表示数据包是被谁收到的
 	skb->dev = dev;
+    // 让skb->mac_header指向skb->data位置，即指向帧的开头
 	skb_reset_mac_header(skb);
 
 	eth = (struct ethhdr *)skb->data;
+    // skb->data指针前移，剥掉以太网帧首部的14个字节，这样skb->data将指向上层协议报文的开头
 	skb_pull_inline(skb, ETH_HLEN);
 
+    // 根据mac地址类型确定输入数据包的类型，即skb->pkt_type字段
 	if (unlikely(!ether_addr_equal_64bits(eth->h_dest,
 					      dev->dev_addr))) {
 		if (unlikely(is_multicast_ether_addr_64bits(eth->h_dest))) {
@@ -200,11 +204,13 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	 */
 	sap = skb_header_pointer(skb, 0, sizeof(*sap), &_service_access_point);
 	if (sap && *sap == 0xFFFF)
+        // 如果帧数据的前两个字节为0xFFFF，那么这是一个802.3以太网数据帧
 		return htons(ETH_P_802_3);
 
 	/*
 	 *      Real 802.2 LLC
 	 */
+    // 其余情况说明这是一个802.2以太网数据帧
 	return htons(ETH_P_802_2);
 }
 EXPORT_SYMBOL(eth_type_trans);

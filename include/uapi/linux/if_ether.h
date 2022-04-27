@@ -161,9 +161,12 @@
 #endif
 
 #if __UAPI_DEF_ETHHDR
+// 以太网帧首部定义
 struct ethhdr {
+    // 6字节的源MAC地址和目的MAC地址
 	unsigned char	h_dest[ETH_ALEN];	/* destination eth addr	*/
 	unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
+    // 协议字段（也可能是长度字段）
 	__be16		h_proto;		/* packet type ID field	*/
 } __attribute__((packed));
 #endif

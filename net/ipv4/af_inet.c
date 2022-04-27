@@ -256,15 +256,18 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	int try_loading_module = 0;
 	int err;
 
+    // 检查协议是否在范围之内
 	if (protocol < 0 || protocol >= IPPROTO_MAX)
 		return -EINVAL;
 
+    // 设置状态为未连接
 	sock->state = SS_UNCONNECTED;
 
 	/* Look for the requested type/protocol pair. */
 lookup_protocol:
 	err = -ESOCKTNOSUPPORT;
 	rcu_read_lock();
+    // 遍历 inetsw[] 数组，其实就是次数而已
 	list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
 
 		err = 0;
@@ -311,6 +314,7 @@ lookup_protocol:
 	    !ns_capable(net->user_ns, CAP_NET_RAW))
 		goto out_rcu_unlock;
 
+    // 对socket 的操作集合进行了互联
 	sock->ops = answer->ops;
 	answer_prot = answer->prot;
 	answer_flags = answer->flags;
@@ -319,6 +323,15 @@ lookup_protocol:
 	WARN_ON(!answer_prot->slab);
 
 	err = -ENOBUFS;
+    /* 此处调用sk_alloc分配一个struct sock，该结构体庞大，其作用是网络层对socket的表示，
+     * 意思就是IP协议下有很多东西比如IP地址，网卡接口，端口等等信息需要再socket层中有所体现从而使编程者方便使用，
+     * 然后就利用指针等形式把内容进行一定程度上的映射。sk_alloc首先对sock->proto和sock_creator进行设置，
+     * 设置成当前协议对应的proto调用sk_prot_alloc()根据是否提供了slab缓存而判断是使用slab缓存还是通用缓存。
+     * 只要分配成功，则调用sock_lock_init()对缓存进行初始化，
+     * 主要是对sock锁、等待队列以及进程数据结构中的网络空间结构进行分配。
+     * 初始化完了后调用sock_net_set()函数对网络空间结构进行记录，然后最后增加一个net计数器。
+     * 至此回到inet_create，判断是否成功分配
+     */
 	sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer_prot, kern);
 	if (!sk)
 		goto out;
@@ -327,17 +340,21 @@ lookup_protocol:
 	if (INET_PROTOSW_REUSE & answer_flags)
 		sk->sk_reuse = SK_CAN_REUSE;
 
+    // 返回一个 struct inet_sock 的指针给 inet
 	inet = inet_sk(sk);
+    // 判断是不是面向连通
 	inet->is_icsk = (INET_PROTOSW_ICSK & answer_flags) != 0;
 
 	inet->nodefrag = 0;
 
+    // 判断是不是原始套接字，如果是，新建IP头部
 	if (SOCK_RAW == sock->type) {
 		inet->inet_num = protocol;
 		if (IPPROTO_RAW == protocol)
 			inet->hdrincl = 1;
 	}
 
+    // 判断是否采用路径 MTU 发现算法
 	if (net->ipv4.sysctl_ip_no_pmtu_disc)
 		inet->pmtudisc = IP_PMTUDISC_DONT;
 	else
@@ -345,6 +362,9 @@ lookup_protocol:
 
 	inet->inet_id = 0;
 
+    // 进一步初始化结构体 sk (struct sock)
+    // sock_init_data： 初始化接收，发送，错误信息队列，三个队列都是双向链表，属于sk_buff_head 结构体，
+    // 其中会把 sk_buff 结构体串联在一起，初始化数据包发送定时器，变量，（主要是函数指针）
 	sock_init_data(sock, sk);
 
 	sk->sk_destruct	   = inet_sock_destruct;
@@ -376,6 +396,7 @@ lookup_protocol:
 		}
 	}
 
+    //  这里，就是调用了协议里面的 init 函数  tcp_v4_init_sock
 	if (sk->sk_prot->init) {
 		err = sk->sk_prot->init(sk);
 		if (err) {
@@ -432,15 +453,24 @@ int inet_release(struct socket *sock)
 }
 EXPORT_SYMBOL(inet_release);
 
+/*
+ * 1.判断套接字是否提供bind接口，目前raw类型套接字提供bind接口
+ * 2.校验ip地址类型是否满足AF_INET、广播、组播、任意地址类型等
+ * 3.校验端口合法性：是否重复绑定、< 1024 是否有权限
+ * 4.根据套接字类型绑定地址信息到套接字中，udp、tcp在此处分流
+ */
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sock *sk = sock->sk;
 	int err;
 
 	/* If the socket has its own bind function then use it. (RAW) */
+    // 如果传输层提供了bind()接口，则直接使用传输层的接口完成绑定;
+    // IPv4协议族中只有RAW套接字实现了该接口
 	if (sk->sk_prot->bind) {
 		return sk->sk_prot->bind(sk, uaddr, addr_len);
 	}
+    // 校验地址信息结构是否是AF_INET协议族的地址结构
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
@@ -512,9 +542,13 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 
 	/* Check these errors (active socket, double bind). */
 	err = -EINVAL;
+    // 如果TCB的状态不是CLOSE或者该TCB已经绑定过了（绑定后的源端口信息会被保存
+    // 到inet->num中，见下文），那么绑定失败，可以看出内核不允许重复调用bind()
 	if (sk->sk_state != TCP_CLOSE || inet->inet_num)
 		goto out_release_sock;
 
+    // 将应用程序指定要绑定的地址保存到TCB中。关于这两个地址的区别，待研究
+    /* socket 绑定地址。 */
 	inet->inet_rcv_saddr = inet->inet_saddr = addr->sin_addr.s_addr;
 	if (chk_addr_ret == RTN_MULTICAST || chk_addr_ret == RTN_BROADCAST)
 		inet->inet_saddr = 0;  /* Use device */
@@ -522,6 +556,8 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 	/* Make sure we are allowed to bind here. */
 	if (snum || !(inet->bind_address_no_port ||
 		      (flags & BIND_FORCE_ADDRESS_NO_PORT))) {
+        // 内核保存端口信息到内核哈希表。调用传输层协议提供的接口执行具体的端口绑定：
+        // TCP为 inet_csk_get_port(); UDP为udp_v4_get_port()，
 		if (sk->sk_prot->get_port(sk, snum)) {
 			inet->inet_saddr = inet->inet_rcv_saddr = 0;
 			err = -EADDRINUSE;
@@ -536,13 +572,17 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 		}
 	}
 
+    // 设置地址和端口绑定标记到TCB中
 	if (inet->inet_rcv_saddr)
 		sk->sk_userlocks |= SOCK_BINDADDR_LOCK;
 	if (snum)
 		sk->sk_userlocks |= SOCK_BINDPORT_LOCK;
+    // 已绑定端口的网络字节序表示保存到inet->sport中
+    /* socket 绑定端口。 */
 	inet->inet_sport = htons(inet->inet_num);
 	inet->inet_daddr = 0;
 	inet->inet_dport = 0;
+    // 复位路由信息
 	sk_dst_reset(sk);
 	err = 0;
 out_release_sock:

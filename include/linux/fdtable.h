@@ -81,7 +81,7 @@ struct dentry;
  */
 static inline struct file *__fcheck_files(struct files_struct *files, unsigned int fd)
 {
-	struct fdtable *fdt = rcu_dereference_raw(files->fdt);
+	struct fdtable *fdt = rcu_dereference_raw(files->fdt); // 获得文件描述符位图表
 
     // 检查 fd 是不是超出了最大限制（max_fds -- 可以分配的最大文件描述符数）
 	if (fd < fdt->max_fds) {

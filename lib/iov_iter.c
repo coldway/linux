@@ -1716,6 +1716,8 @@ ssize_t compat_import_iovec(int type,
 EXPORT_SYMBOL(compat_import_iovec);
 #endif
 
+// 在import_single_range中，MAX_RW_COUNT是一个宏：INT_MAX & PAGE_MASK，INT_MAX是2^31，
+// 理论上每次write可写的buff大小是2^31-2^12=2147479552，然后使用了迭代器
 int import_single_range(int rw, void __user *buf, size_t len,
 		 struct iovec *iov, struct iov_iter *i)
 {

@@ -509,22 +509,24 @@ int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
 	int ret;
 
 	for (; s < e->num_hook_entries; s++) {
+        // 调用对应钩子函数
 		verdict = nf_hook_entry_hookfn(&e->hooks[s], skb, state);
+        // 判断钩子函数的返回值,决定该数据包的后续处理流程
 		switch (verdict & NF_VERDICT_MASK) {
-		case NF_ACCEPT:
+		case NF_ACCEPT: // 允许数据包继续下一步
 			break;
-		case NF_DROP:
+		case NF_DROP: // 丢弃该数据包，直接返回EPERM
 			kfree_skb(skb);
 			ret = NF_DROP_GETERR(verdict);
 			if (ret == 0)
 				ret = -EPERM;
 			return ret;
-		case NF_QUEUE:
+		case NF_QUEUE: // 数据包加入用户队列，给用户程序处理，然后返回
 			ret = nf_queue(skb, state, s, verdict);
 			if (ret == 1)
 				continue;
 			return ret;
-		default:
+		default: // NF_STOLEN，让netfilter框架忽略该数据包的处理
 			/* Implicit handling for NF_STOLEN, as well as any other
 			 * non conventional verdicts.
 			 */

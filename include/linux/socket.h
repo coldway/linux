@@ -47,9 +47,11 @@ struct linger {
  */
 
 struct msghdr {
+    /* 接收方的struct sockaddr结构体地址（用于udp) */
 	void		*msg_name;	/* ptr to socket address structure */
+    /* 接收方的struct sockaddr结构体地址（用于udp) */
 	int		msg_namelen;	/* size of socket address structure */
-	struct iov_iter	msg_iter;	/* data */
+	struct iov_iter	msg_iter;	/* data */ /* io缓冲区的地址 */
 
 	/*
 	 * Ancillary data. msg_control_user is the user buffer used for the
@@ -57,12 +59,12 @@ struct msghdr {
 	 * buffer used for all other cases.
 	 */
 	union {
-		void		*msg_control;
+		void		*msg_control;      /* 辅助数据的地址 */
 		void __user	*msg_control_user;
 	};
 	bool		msg_control_is_user : 1;
-	__kernel_size_t	msg_controllen;	/* ancillary data buffer length */
-	unsigned int	msg_flags;	/* flags on received message */
+	__kernel_size_t	msg_controllen;	/* ancillary data buffer length */ /* 辅助数据的长度 */
+	unsigned int	msg_flags;	/* flags on received message */        /* 接受消息的表示 */
 	struct kiocb	*msg_iocb;	/* ptr to iocb for async requests */
 };
 

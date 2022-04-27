@@ -709,6 +709,9 @@ typedef unsigned char *sk_buff_data_t;
  */
 
 struct sk_buff {
+    /* next和prev这两个域链接相关的sk_buff结构，当报文分段时，原始报文的每个分段
+     * 通过next域链接在一起。
+     */
 	union {
 		struct {
 			/* These two members must be first. */
@@ -716,6 +719,9 @@ struct sk_buff {
 			struct sk_buff		*prev;
 
 			union {
+                /* 这是指向设备（struct net_device）的指针，报文通过此设备接收或者发送。
+                 * net_device记录网络接口（数据链路层）信息以及该设备的相关操作。
+                 */
 				struct net_device	*dev;
 				/* Some protocols might use this space to store information,
 				 * while device pointer would be NULL.
@@ -729,12 +735,12 @@ struct sk_buff {
 	};
 
 	union {
-		struct sock		*sk;
+		struct sock		*sk; // 指向报文（sk_buff）所属套接字的指针
 		int			ip_defrag_offset;
 	};
 
 	union {
-		ktime_t		tstamp;
+		ktime_t		tstamp; // 记录接收或者传输报文的时间戳
 		u64		skb_mstamp_ns; /* earliest departure time */
 	};
 	/*
@@ -743,6 +749,7 @@ struct sk_buff {
 	 * want to keep them across layers you have to do a skb_clone()
 	 * first. This is owned by whoever has the skb queued ATM.
 	 */
+    /* 该域保存协议相关的控制信息，每个协议层可能独立的使用这些信息。*/
 	char			cb[48] __aligned(8);
 
 	union {
@@ -756,10 +763,12 @@ struct sk_buff {
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	unsigned long		 _nfct;
 #endif
-	unsigned int		len,
-				data_len;
-	__u16			mac_len,
-				hdr_len;
+    // skb的组成是有sk_buff控制 + 线性数据 + 非线性数据  (skb_shared_info) 组成！
+    // 非线性数据！那么len就是length(线性数据) + length(非线性数据)！！！
+	unsigned int		len, // 该域记录sk_buff中数据的总长度
+				data_len;    // 只有当sk_buff中有非线性数据时才使用该域
+	__u16			mac_len, // 有二层数据的时候使用
+				hdr_len;     // 用于clone时，表示clone的skb的头长度
 
 	/* Following fields are _not_ copied in __copy_skb_header()
 	 * Note that queue_mapping is here mostly to fill a hole.
@@ -777,9 +786,9 @@ struct sk_buff {
 	/* private: */
 	__u8			__cloned_offset[0];
 	/* public: */
-	__u8			cloned:1,
-				nohdr:1,
-				fclone:2,
+	__u8			cloned:1, // 保存当前的skb_buff是克隆的还是原始数据
+				nohdr:1,      // 仅仅引用数据区域// nohdr标识payload是否被单独引用，不存在协议首部。
+				fclone:2,     // 克隆状态
 				peeked:1,
 				head_frag:1,
 				pfmemalloc:1;
@@ -804,10 +813,10 @@ struct sk_buff {
 	/* private: */
 	__u8			__pkt_type_offset[0];
 	/* public: */
-	__u8			pkt_type:3;
-	__u8			ignore_df:1;
+	__u8			pkt_type:3;  // 标记帧的类型 根据L2层帧的目的地址进行类型划分。
+	__u8			ignore_df:1; // 允许本地分段
 	__u8			nf_trace:1;
-	__u8			ip_summed:2;
+	__u8			ip_summed:2; // 该域表示驱动是否计算IP校验和
 	__u8			ooo_okay:1;
 
 	__u8			l4_hash:1;
@@ -862,14 +871,15 @@ struct sk_buff {
 #endif
 
 	union {
-		__wsum		csum;
+		__wsum		csum; // 某时刻协议的校验和
+		// 检验码，必须包括开始/偏移
 		struct {
 			__u16	csum_start;
 			__u16	csum_offset;
 		};
 	};
-	__u32			priority;
-	int			skb_iif;
+	__u32			priority; // 该域保存报文的排队优先级信息，这基于IP头中的TOS域
+	int			skb_iif;      // 接受设备的index
 	__u32			hash;
 	__be16			vlan_proto;
 	__u16			vlan_tci;
@@ -897,23 +907,41 @@ struct sk_buff {
 	__u16			inner_network_header;
 	__u16			inner_mac_header;
 
-	__be16			protocol;
-	__u16			transport_header;
-	__u16			network_header;
-	__u16			mac_header;
+	__be16			protocol;         // 协议信息
+	__u16			transport_header; // 指向四层帧头结构体指针
+	__u16			network_header;   // 指向三层IP头结构体指针
+	__u16			mac_header;       // 指向二层mac头的头
 
 	/* private: */
 	__u32			headers_end[0];
 	/* public: */
 
 	/* These elements must be at the end, see alloc_skb() for details.  */
-	sk_buff_data_t		tail;
+	sk_buff_data_t		tail; // 该域指向驻留在线性数据区的最后一个字节的数据
+    /* 该域指向线性数据区的结尾，与tail不同。驻留在线性数据区中的数据结尾并不是
+     * 总是在线性数据区的结尾。利用该域可以确保我们没有使用超出可用存储的缓冲区
+     */
 	sk_buff_data_t		end;
-	unsigned char		*head,
+	unsigned char		*head, /* 该域指向线性数据区的开始（为sk_buff分配的线性数据区的首字节） */
+    /* 该域指向驻留在线性数据区的数据的起始位置。驻留在线性数据区中的数据可能并不总是从线性数据区的起始head开始。*/
 				*data;
+    /* 该域保存为该缓冲区所分配的总内存。它包括sk_buff结构的大小+分配给该
+     * sk_buff的数据块的大小。
+     */
 	unsigned int		truesize;
-	refcount_t		users;
-
+	refcount_t		users; // 这是个引用计数，表明了有多少实体引用了这个skb
+    /*
+     * (1)sk_buff->data_len：只计算分片中数据的长度，即是分片结构体中page指向的数据区长度。
+     * (2)sk_buff->len：表示当前缓冲区中数据块的大小的总长度。它包括主缓冲中
+     * (sk_buff结构中指针data指向）的数据区的实际长度（data-tail）和分片中的数据长度。
+     * 这个长度在数据包在各层间传输时会改变，因为分片数据长度不变，从L2到L4时，
+     * 则len要减去帧头大小和网络头大小；从L4到L2则相反，要加上帧头和网络头大小。
+     * 所以：len = (data - tail) + data_len；
+     * (3)sk_buff->truesize：这是缓冲区的总长度，包括sk_buff结构和数据部分。
+     * 如果申请一个len字节的缓冲区，alloc_skb函数会把它初始化成len+sizeof(sk_buff)。
+     * 当skb->len变化时，这个变量也会变化。
+     * 所以：truesize = len + sizeof(sk_buff) = (data - tail) + data_len + sizeof(sk_buff)；
+     */
 #ifdef CONFIG_SKB_EXTENSIONS
 	/* only useable after checking ->active_extensions != 0 */
 	struct skb_ext		*extensions;
@@ -2814,6 +2842,9 @@ static inline struct sk_buff *__dev_alloc_skb(unsigned int length,
 }
 
 /* legacy helper around netdev_alloc_skb() */
+/* 分配skb，通常被设备驱动用在中断上下文中，它是alloc_skb的封装函数，
+ * 因为在中断处理函数中被调用，因此要求原子操作(GFP_ATOMIC)----不允许休眠
+ */
 static inline struct sk_buff *dev_alloc_skb(unsigned int length)
 {
 	return netdev_alloc_skb(NULL, length);

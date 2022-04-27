@@ -495,7 +495,7 @@ static inline int neigh_hh_output(const struct hh_cache *hh, struct sk_buff *skb
 	}
 
 	__skb_push(skb, hh_len);
-	return dev_queue_xmit(skb);
+	return dev_queue_xmit(skb); // 转交至设备驱动 int dev_queue_xmit
 }
 
 static inline int neigh_output(struct neighbour *n, struct sk_buff *skb,
@@ -503,10 +503,11 @@ static inline int neigh_output(struct neighbour *n, struct sk_buff *skb,
 {
 	const struct hh_cache *hh = &n->hh;
 
+    /* 如果neighbour已连接且hh已设置 */
 	if ((n->nud_state & NUD_CONNECTED) && hh->hh_len && !skip_cache)
 		return neigh_hh_output(hh, skb);
 	else
-		return n->output(n, skb);
+		return n->output(n, skb); /* 初始阶段调用此函数，此时neigh_resolve_output函数 */
 }
 
 static inline struct neighbour *

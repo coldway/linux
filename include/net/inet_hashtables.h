@@ -76,18 +76,18 @@ struct inet_ehash_bucket {
 struct inet_bind_bucket {
 	possible_net_t		ib_net;
 	int			l3mdev;
-	unsigned short		port;
-	signed char		fastreuse;
-	signed char		fastreuseport;
-	kuid_t			fastuid;
+	unsigned short		port;     /* 端口号。 */
+	signed char		fastreuse;    /* SO_REUSEADDR 选项。*/
+	signed char		fastreuseport;/* SO_REUSEPORT 选项。*/
+	kuid_t			fastuid;      /* SO_REUSEPORT 选项的用户 id。*/
 #if IS_ENABLED(CONFIG_IPV6)
 	struct in6_addr		fast_v6_rcv_saddr;
 #endif
 	__be32			fast_rcv_saddr;
 	unsigned short		fast_sk_family;
 	bool			fast_ipv6_only;
-	struct hlist_node	node;
-	struct hlist_head	owners;
+	struct hlist_node	node;      /* bucket 列表，保存哈希冲突的 bucket。*/
+	struct hlist_head	owners;    /* socket 信息。 */
 };
 
 static inline struct net *ib_net(struct inet_bind_bucket *ib)

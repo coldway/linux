@@ -158,6 +158,21 @@ typedef __u64 __bitwise __addrpair;
  *	This is the minimal network layer representation of sockets, the header
  *	for struct sock and struct inet_timewait_sock.
  */
+/*
+ * 该结构是传输控制块信息的最小集合，由sock和inet_timewait_sock结构
+ * 前面相同部分单独构成，因此只用来构成这两种结构
+ */
+// tcp_timewait_sock包含inet_timewait_sock，inet_timewait_sock包含sock_common
+/* struct sock里面包含struct sock_common
+ * 以tcp为例，struct tcp_sock包含struct inet_connection_sock,inet_connection_sock包含 struct inet_sock，struct inet_sock包含struct sock, struct sock后面是 struct sock_common。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct tcp_sock)
+ * 以udp为例，struct udp_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock， struct sock后面是 struct sock_common。。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct udp_sock)
+ * 以raw为例，struct raw_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock， struct sock后面是 struct sock_common。。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct raw_sock)
+// tcp_timewait_sock包含inet_timewait_sock，inet_timewait_sock包含sock_common
+ tcp_request_sock包含inet_request_sock，inet_request_sock包含request_sock
+ */
+//sock_common是传输控制块信息最小集合 struct sock是比较通用的网络层描述块，
+// 与具体的协议族无关，他描述个各个不同协议族传输层的公共信息
+
 struct sock_common {
 	/* skc_daddr and skc_rcv_saddr must be grouped on a 8 bytes aligned
 	 * address on 64bit arches : cf INET_MATCH()
@@ -183,14 +198,29 @@ struct sock_common {
 	};
 
 	unsigned short		skc_family;
+    /* 等同于TCP的状态。见TCPF_ESTABLISHED */
 	volatile unsigned char	skc_state;
+    /*
+     * 是否可以重用地址和端口
+     * 在SO_REUSEADDR中设置，linxu系统中设置地址可重用，端口也可以重用端口复用是有条件的，
+     * 就是sk如果传输控制块允许复用并且不是监听状态sk->sk_state != TCP_LISTEN，见inet_csk_get_port
+     */
 	unsigned char		skc_reuse:4;
 	unsigned char		skc_reuseport:1;
 	unsigned char		skc_ipv6only:1;
 	unsigned char		skc_net_refcnt:1;
-	int			skc_bound_dev_if;
+    /* 如果不为0，即为输出报文的网络设备索引号 */
+	int			skc_bound_dev_if;// 通过应用程序的setsockopt里面的选项设置
+    /*
+     * 已绑定端口的传输控制模块利用该字段插入到与之绑定端口信息结构为头结点的链表中。
+     * 释放端口时，会从中删除。仅用于基于连接的传输控制块，如TCP
+     * inet_bind_bucket加入到的sk->sk_bind_node中，见inet_bind_hash
+     * struct sock被添加到inet_bind_bucket结构的owners链表中(inet_bind_hash)，
+     * 然后该inet_bind_bucket通过node节点加入到tcp_hashinfo中
+     */
 	union {
 		struct hlist_node	skc_bind_node;
+        // 通过函数 ip4_datagram_connect中的udp_v4_rehash添加把udp协议的struct sock添加到udp_table
 		struct hlist_node	skc_portaddr_node;
 	};
 	struct proto		*skc_prot;
@@ -220,9 +250,16 @@ struct sock_common {
 	/* private: */
 	int			skc_dontcopy_begin[0];
 	/* public: */
+    /*
+     * TCP维护一个所有TCP传输控制块的散列表tcp_hashinfo,
+     * 而skc_node用来将所属TCP传输控制块链接到该散列表，
+       udp的hashinfo为udp_table
+     */
+    // udp没有加入到这里面任何一个list中  本段为服务器端的时候tcp和raw在listen的时候
+    // 调用inet_csk_listen_start把struct sock添加到对应协议的struct proto对应的h成员(hashinfo)中
 	union {
-		struct hlist_node	skc_node;
-		struct hlist_nulls_node skc_nulls_node;
+		struct hlist_node	skc_node; // raw通过raw_hash_sk把sk加入到raw_hashinfo的ht
+		struct hlist_nulls_node skc_nulls_node; // tcp通过inet_hash把sk->skc_nulls_node加入到tcp_hashinfo结构中的listening_hash
 	};
 	unsigned short		skc_tx_queue_mapping;
 #ifdef CONFIG_XPS
@@ -234,6 +271,9 @@ struct sock_common {
 		u32		skc_tw_rcv_nxt; /* struct tcp_timewait_sock  */
 	};
 
+    /*
+     * 引用计数，当引用计数为0时才能被释放
+     */
 	refcount_t		skc_refcnt;
 	/* private: */
 	int                     skc_dontcopy_end[0];
@@ -343,13 +383,38 @@ struct bpf_sk_storage;
   *	@sk_txtime_report_errors: set report errors mode for SO_TXTIME
   *	@sk_txtime_unused: unused txtime flags
   */
+/*
+ * struct sock是与具体传输层协议相关的套接字，所有内核的操作都基于这个套接字。
+ * 传输控制块  struct socket里面的struct sock指向了这里
+ * 在inet_create中为该结构体分配空间并赋初值。
+ */
+/* 套接字中本段和对端的相关信息都放在inet_sock中，可以保证和协议无关，各种协议都用该结构存储本地地址端口和对端地址端口已经连接状态等
+ * 以tcp为例，struct tcp_sock包含struct inet_connection_sock,inet_connection_sock包含 struct inet_sock，struct inet_sock包含struct sock。
+ * 所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct tcp_sock)
+ * 以udp为例，struct udp_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock。
+ * 所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct udp_sock)
+ * 以raw为例，struct raw_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock。
+ * 所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct raw_sock)
+
+ * struct sock里面包含struct sock_common
+ * 以tcp为例，struct tcp_sock包含struct inet_connection_sock,inet_connection_sock包含 struct inet_sock，struct inet_sock包含struct sock, struct sock后面是 struct sock_common。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct tcp_sock)
+ * 以udp为例，struct udp_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock， struct sock后面是 struct sock_common。。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct udp_sock)
+ * 以raw为例，struct raw_sock包含struct inet_connection_sock inet_connection_sock包含struct inet_sock，struct inet_sock包含struct sock， struct sock后面是 struct sock_common。。所以在struct socket里面的sk指向的开辟空间大小是sizeof(struct raw_sock)
+ * tcp_timewait_sock包含inet_timewait_sock，inet_timewait_sock包含sock_common
+ * tcp_request_sock包含inet_request_sock，inet_request_sock包含request_sock
+ *
+ * tcp_sock->inet_connection_sock->inet_sock->sock(socket里面的sk指向sock)
+ */
 struct sock {
 	/*
 	 * Now struct inet_timewait_sock also uses sock_common, so please just
 	 * don't add nothing before this first member (__sk_common) --acme
 	 */
 	struct sock_common	__sk_common;
+// raw通过raw_hash_sk  sk->sk_node加入到raw_hashinfo的ht,相当于struct sock连接到了raw_hashinfo中
 #define sk_node			__sk_common.skc_node
+// tcp通过inet_hash把sk->skc_nulls_node加入到tcp_hashinfo结构中的listening_hash。
+// 见__sk_nulls_add_node_rcu
 #define sk_nulls_node		__sk_common.skc_nulls_node
 #define sk_refcnt		__sk_common.skc_refcnt
 #define sk_tx_queue_mapping	__sk_common.skc_tx_queue_mapping
@@ -367,27 +432,78 @@ struct sock {
 #define sk_daddr		__sk_common.skc_daddr
 #define sk_rcv_saddr		__sk_common.skc_rcv_saddr
 #define sk_family		__sk_common.skc_family
+// sk_flags取值为sock_flags，状态转换图为前面的sk_state，取值为TCP_SYN_RECV等
+// sk_state在tcp_set_state中赋值
 #define sk_state		__sk_common.skc_state
 #define sk_reuse		__sk_common.skc_reuse
 #define sk_reuseport		__sk_common.skc_reuseport
 #define sk_ipv6only		__sk_common.skc_ipv6only
 #define sk_net_refcnt		__sk_common.skc_net_refcnt
 #define sk_bound_dev_if		__sk_common.skc_bound_dev_if
+// 客户端tcp在conncet的时候把sk通过inet_bind_bucket加入到tcp_hashinfo中
+// inet_bind_bucket也被添加到inet_connection_sock中的icsk_bind_hash
+// 参考  sk_add_bind_node
 #define sk_bind_node		__sk_common.skc_bind_node
+/* 指向网络接口层的指针,如果是TCP套接字，为tcp_prot
+ * 如果是UDP套接字为udp_prot。raw_prot
+ * */
 #define sk_prot			__sk_common.skc_prot
 #define sk_net			__sk_common.skc_net
 #define sk_v6_daddr		__sk_common.skc_v6_daddr
 #define sk_v6_rcv_saddr	__sk_common.skc_v6_rcv_saddr
 #define sk_cookie		__sk_common.skc_cookie
 #define sk_incoming_cpu		__sk_common.skc_incoming_cpu
+/*
+ * 标志位，可能的取值参见枚举类型sock_flags.
+ * 判断某个标志是否设置调用sock_flag函数来判断，而不是直接使用位操作。
+ */
 #define sk_flags		__sk_common.skc_flags
 #define sk_rxhash		__sk_common.skc_rxhash
 
+    /*
+     * 同步锁，其中包括了两种锁:一是用于用户进程读取数据
+     * 和网络层向传输层传递数据之间的同步锁；二是控制Linux
+     * 下半部访问本传输控制块的同步锁，以免多个下半部同
+     * 时访问本传输控制块
+     */
 	socket_lock_t		sk_lock;
 	atomic_t		sk_drops;
+    /*
+     * 标识接收缓存下限值
+     */
 	int			sk_rcvlowat;
+    /*
+     * 错误链表，存放详细的出错信息。应用程序通过setsockopt
+     * 系统调用设置IP_RECVERR选项，即需获取详细出错信息。当
+     * 有错误发生时，可通过recvmsg()，参数flags为MSG_ERRQUEUE
+     * 来获取详细的出错信息
+     * update:
+     * sk_error_queue用于保存错误消息，当ICMP接收到差错消息或者
+     * UDP套接字和RAW套接字输出报文出错时，会产生描述错误信息的
+     * SKB添加到该队列上。应用程序为能通过系统调用获取详细的
+     * 错误消息，需要设置IP_RECVERR套接字选项，之后可通过参数
+     * flags为MSG_ERRQUEUE的recvmsg系统调用来获取详细的出错
+     * 信息。
+     * UDP套接字和RAW套接字在调用recvmsg接收数据时，可以设置
+     * MSG_ERRQUEUE标志，只从套接字的错误队列上接收错误而不
+     * 接收其他数据。实现这个功能是通过ip_recv_error()来完成的。
+     * 在基于连接的套接字上，IP_RECVERR意义则会有所不同。并不
+     * 保存错误信息到错误队列中，而是立即传递所有收到的错误信息
+     * 给用户进程。这对于基于短连接的TCP应用是很有用的，因为
+     * TCP要求快速的错误处理。需要注意的是，TCP没有错误队列，
+     * MSG_ERRQUEUE对于基于连接的套接字是无效的。
+     * 错误信息传递给用户进程时，并不将错误信息作为报文的内容传递
+     * 给用户进程，而是以错误信息块的形式保存在SKB控制块中，
+     * 通常通过SKB_EXT_ERR来访问SKB控制块中的错误信息块。
+     * 参见sock_exterr_skb结构。
+     */
 	struct sk_buff_head	sk_error_queue;
 	struct sk_buff		*sk_rx_skb_cache;
+    /*
+     * 接收队列，等待用户进程读取。TCP比较特别，
+     * 当接收到的数据不能直接复制到用户空间时才会
+     * 缓存在此
+     */
 	struct sk_buff_head	sk_receive_queue;
 	/*
 	 * The backlog queue is special, it is always used with
@@ -397,23 +513,72 @@ struct sock {
 	 * on 64bit arches, not because its logically part of
 	 * backlog.
 	 */
+    /*
+     * 后备接收队列，目前只用于TCP.传输控制块被上锁后(如应用层
+     * 读取数据时),当有新的报文传递到传输控制块时，只能把报文
+     * 放到后备接受队列中，之后有用户进程读取TCP数据时，再从
+     * 该队列中取出复制到用户空间中.
+     * 一旦用户进程解锁传输控制块，就会立即处理
+     * 后备队列，将TCP段处理之后添加到接收队列中。
+     */
 	struct {
 		atomic_t	rmem_alloc;
 		int		len;
 		struct sk_buff	*head;
 		struct sk_buff	*tail;
 	} sk_backlog;
+
+    // 这个只针对接收数据，发送数据对应的是sk_rmem_alloc，
+    // 阅读函数__sk_mem_schedule可以了解proto的内存情况判断方法
+    // 表示接收队列中所有skb的总长度，在sock_queue_rcv_skb函数的skb_set_owner_r中增加
 #define sk_rmem_alloc sk_backlog.rmem_alloc
 
+    /*
+     * 预分配缓存长度，这只是一个标识，目前 只用于TCP。
+     * 当分配的缓存小于该值时，分配必然成功，否则需要
+     * 重新确认分配的缓存是否有效。参见__sk_mem_schedule().
+     * 在sk_clone()中，sk_forward_alloc被初始化为0.
+     *
+     * update:sk_forward_alloc表示预分配长度。当我们第一次要为
+     * 发送缓冲队列分配一个struct sk_buff时，我们并不是直接
+     * 分配需要的内存大小，而是会以内存页为单位进行
+     * 预分配(此时并不是真的分配内存)。当把这个新分配
+     * 成功的struct sk_buff放入缓冲队列sk_write_queue后，从sk_forward_alloc
+     * 中减去该sk_buff的truesize值。第二次分配struct sk_buff时，只要再
+     * 从sk_forward_alloc中减去新的sk_buff的truesize即可，如果sk_forward_alloc
+     * 已经小于当前的truesize，则将其再加上一个页的整数倍值，
+     * 并累加如tcp_memory_allocated。
+
+     * 也就是说，通过sk_forward_alloc使全局变量tcp_memory_allocated保存
+     * 当前tcp协议总的缓冲区分配内存的大小，并且该大小是
+     * 页边界对齐的。
+     */
+    // 这是本sock的缓存大小，如果要看整个tcp sock的缓存大小，要参考tcp_prot中的memory_allocated成员
+    // 阅读函数__sk_mem_schedule可以了解proto的内存情况判断方法 。  注意和上面的sk_wmem_alloc的区别
 	int			sk_forward_alloc;
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	unsigned int		sk_ll_usec;
 	/* ===== mostly read cache line ===== */
 	unsigned int		sk_napi_id;
 #endif
+    /* 接收缓冲区大小的上限，默认值是sysctl_rmem_default(sock_init_data)，即32767，
+     * 也就是IP首部16位长度(最大65535)的一半
+     */
+    //当sock接收到一个包的时候，会在sock_queue_rcv_skb中判断当前队列中已有的skb占用的buffer和这个新来的buff之后是否超过了sk_rcvbuf
 	int			sk_rcvbuf;
 
+    /*
+     * 套接字过滤器。在传输层对输入的数据包通过BPF过滤代码进行过滤，
+     * 只对设置了套接字过滤器的进程有效。
+     */
 	struct sk_filter __rcu	*sk_filter;
+    /*
+     * 进程等待队列。进程等待连接、等待输出缓冲区、等待
+     * 读数据时，都会将进程暂存到此队列中。这个成员最初
+     * 是在sk_clone()中初始化为NULL，该成员实际存储的socket结构
+     * 中的wait成员，这个操作在sock_init_data()中完成。
+     * 有的版本这里直接是wait, 唤醒该队列上的进程函数是sock_def_wakeup
+     */
 	union {
 		struct socket_wq __rcu	*sk_wq;
 		/* private: */
@@ -424,37 +589,121 @@ struct sock {
 	struct xfrm_policy __rcu *sk_policy[2];
 #endif
 	struct dst_entry	*sk_rx_dst;
+    /*
+     * 目的路由项缓存，一般都是在创建传输控制块发送
+     * 数据报文时，发现未设置该字段才从路由表或路由
+     * 缓存中查询到相应的路由项来设置新字段，这样可以
+     * 加速数据的输出，后续数据的输出不必再查询目的
+     * 路由。某些情况下会刷新此目的路由缓存，比如断开
+     * 连接、重新进行了连接、TCP重传、重新绑定端口等操作
+     */
 	struct dst_entry __rcu	*sk_dst_cache;
+    /*
+     * 分配辅助缓冲区的上限，辅助数据包括进行设置选项、
+     * 设置过滤时分配到的内存和组播设置等
+     */
 	atomic_t		sk_omem_alloc;
+    /*
+     * 发送缓冲区长度的上限，发送队列中报文数据总长度不能
+     * 超过该值.默认值是sysctl_wmem_default，即32767。
+     * 在通过setsockops设置时，其值最大为sysctl_wmem_max的两倍
+     */
+    // 发送缓冲区会根据该proto使用的内存情况，进行调整，见__sk_mem_schedule中的sk_stream_moderate_sndbuf        并能通过tcp_rmem调整。
 	int			sk_sndbuf;
 
 	/* ===== cache line for TX ===== */
-	int			sk_wmem_queued;
-	refcount_t		sk_wmem_alloc;
+    /* 发送队列中所有报文数据的总长度，目前只用于TCP 。这里
+     * 统计的是发送队列中所有报文的长度，不包括因为发送而克隆
+     * 出来的SKB占用的内存。是真正的占用空间的发送队列数据长度。见skb_entail
+     */
+	int			sk_wmem_queued; // skb_entail中会赋值
+
+    /* 所在传输控制块中，为发送而分配的所有SKB数据区的总长度。这个成员和
+    * sk_wmem_queued不同，所有因为发送而分配的SKB数据区的内存都会统计到
+    * sk_wmem_alloc成员中。例如，在tcp_transmit_skb()中会克隆发送队列中的
+    * SKB，克隆出来的SKB所占的内存会统计到sk_wmem_alloc，而不是sk_wmem_queued中。
+    *
+    * 释放sock结构时，会先将sk_wmem_alloc成员减1，如果为0，说明没有待
+    * 发送的数据，才会真正释放。所以这里要先将其初始化为1,参见sk_alloc()。
+    * 该成员在skb_set_owner_w()中会更新。
+    */
+    // 通过阅读函数sock_alloc_send_pskb可以理解改变量的作用
+    // 每开辟一个SKB的时候当应用程序通过套接口传数据的时候，最终会把数据传输到SKB中，
+    // 然后把数据长度+header长度的值赋值给该变量中，表示当前该套接字中未发送的数据为多少
+    // 见sock_alloc_send_pskb中的skb_set_owner_w
+    // 在开辟空间前要和sk_sndbuf做比较
+    // 在sk_alloc的时候初始化设置为1，然后在skb_set_owner_w加上SKB长度，
+    // 当SKB发送出去后，在减去该SKB的长度，所以这个值当数据发送后其值始终是1，不会执行sock_wfree
+    //这个为发送队列(包括克隆的)分配的实际空间，
+    // sk_forward_alloc是提前预分配的，实际上并没有分片空间，
+    // 只是说先确定下来可以用这么多空间，就是后面分片空间的时候最多可以分片这么多空间。
+	refcount_t		sk_wmem_alloc; // 这个只针对发送数据，接收数据对应的是sk_rmem_alloc，
 	unsigned long		sk_tsq_flags;
 	union {
-		struct sk_buff	*sk_send_head;
+        /*
+         * 指向sk_write_queue队列中第一个未发送的结点，如果sk_send_head
+         * 为空则表示发送队列是空的，发送队列上的报文已全部发送。
+         */
+		struct sk_buff	*sk_send_head; //表示sk_write_queue队列中还未调用dev_queue_xmit的最前面一个SKB的地方
 		struct rb_root	tcp_rtx_queue;
 	};
 	struct sk_buff		*sk_tx_skb_cache;
+    /*
+     * 发送队列，在TCP中，此队列同时也是重传队列，
+     * 在sk_send_head之前为重传队列，之后为发送
+     * 队列，参见sk_send_head
+     */
+    // 这上面存的是发送SKB链表，即使调用了dev_queue_xmit后,该SKB海在该链表上面，知道收到对方ack。
 	struct sk_buff_head	sk_write_queue;
+    /*
+     * 表示数据尾端在最后一页分片内的页内偏移，
+     * 新的数据可以直接从这个位置复制到该分片中
+     */
+    //在tcp_sendmsg中开辟空间后，并复制，见里面的TCP_OFF(sk) = off + copy;
 	__s32			sk_peek_off;
+    /* 标识有数据即将写入套接口，
+     * 也就是有写数据的请求
+     */
 	int			sk_write_pending;
 	__u32			sk_dst_pending_confirm;
 	u32			sk_pacing_status; /* see enum sk_pacing */
+    /*
+     * 套接字层发送超时,初始值为MAX_SCHEDULE_TIMEOUT。
+     * 可以通过套接字选项SO_SNDTIMEO来设置发送的超时时间。
+     * connect的时候判断是否connect超时用的就是这个值  使用该值的地方在sock_sndtimeo
+     */
 	long			sk_sndtimeo;
+    /*
+     * 通过TCP的不同状态，来实现连接定时器、FIN_WAIT_2定时器(该定时器在TCP四次挥手过程中结束，
+     * 见tcp_rcv_state_process)以及TCP保活定时器，在tcp_keepalive_timer中实现
+     * 定时器处理函数为tcp_keepalive_timer(),参见tcp_v4_init_sock()和tcp_init_xmit_timers()。
+     */
 	struct timer_list	sk_timer;
-	__u32			sk_priority;
+	__u32			sk_priority; //SKB->priority就是用的该字段
 	__u32			sk_mark;
 	unsigned long		sk_pacing_rate; /* bytes per second */
 	unsigned long		sk_max_pacing_rate;
 	struct page_frag	sk_frag;
+    /*
+     * 目的路由网络设备的特性，在sk_setup_caps()中根据
+     * net_device结构的features成员设置
+     */
+    // 如果网口设备dev设置了dev->features |= NETIF_F_TSO，则支持TSO
+    // 参考e1000网卡的这里enic_ethtool_ops
 	netdev_features_t	sk_route_caps;
 	netdev_features_t	sk_route_nocaps;
 	netdev_features_t	sk_route_forced_caps;
-	int			sk_gso_type;
+    /*
+     * 传输层支持的GSO类型，如SKB_GSO_TCPV4等  默认该值为SKB_GSO_TCPV4
+     */
+	int			sk_gso_type; // tcp_v4_connect
+    /*
+     * 这个成员在sk_setup_caps()中初始化，表示最大TCP分段的大小。
+     * 注意，这个大小包括IP首部长度长度、IP选项长度及TCP首部和选项，
+     * 另外还要减1(这个减1不知道是为什么。。。。)
+     */
 	unsigned int		sk_gso_max_size;
-	gfp_t			sk_allocation;
+	gfp_t			sk_allocation;/* 内存分配方式，参见include\linux\gfp.h。值为__GFP_DMA等 */
 	__u32			sk_txhash;
 
 	/*
@@ -470,17 +719,58 @@ struct sock {
 	u16			sk_type;
 	u16			sk_protocol;
 	u16			sk_gso_max_segs;
-	unsigned long	        sk_lingertime;
+    /* 关闭套接字前发送剩余数据的时间*/
+	unsigned long	        sk_lingertime; // setsockops中设置 SO_LINGER
+    /*
+     * 原始网络协议块指针。因为传输控制块中的另一个网络
+     * 协议块指针sk_prot在IPv6的IPV6_ADDRFORM套接字选项
+     * 设置时被修改
+     */
 	struct proto		*sk_prot_creator;
+    /*
+     * 确保传输控制块中一些成员同步访问的锁。因为有些成员在软
+     * 中断中被访问，存在异步访问的问题
+     */
 	rwlock_t		sk_callback_lock;
+    /*
+     * 记录当前传输层中发生的最后一次致命错误的错误码，但
+     * 应用层读取后会自动恢复为初始正常状态.
+     * 错误码的设置是由tcp_v4_err()函数完成的。
+     */
 	int			sk_err,
+    /*
+     * 用于记录非致命性错误，或者用作在传输控制块被
+     * 锁定时记录错误的后备成员
+     */
 				sk_err_soft;
+    /* 当前已建立的连接数 */  //表示套接口上可以排队等待连接的连接数门限值
+    //在三次握手成功的第三步ACK成功后，会从listen_sock里面的syn_table hash中取出，
+    // 让后加入到request_sock_queue的rskq_accept_head中，同时增加已连接成功值，
+    // 当应用程序调用accept的时候，会从里面取出这个已连接信息，然后再减小改制，同时释放这个request_sock
+    // 这个是从半连接队列取出request_sock后加入到已连接队列中的request_sock个数，
+    // sk_ack_backlog是已经完成了三次握手，但是还没有被accept系统调用处理的连接请求数量；
+    // sk_max_ack_backlog就是我们经常熟悉的listen的参数。
+    // 建立连接的过程中加1，在reqsk_queue_add中赋值减1在reqsk_queue_get_child
 	u32			sk_ack_backlog;
+    // 在inet_listen赋值，为listen的第三个参数向上取得的2次密reqsk_queue_alloc，
+    // 这个值和半连接里面的listen_sock中的nr_table_entries相？
 	u32			sk_max_ack_backlog;
 	kuid_t			sk_uid;
 	struct pid		*sk_peer_pid;
+    /* 返回连接至该套接字的外部进程的身份验证，目前主要用于PF_UNIX协议族*/
 	const struct cred	*sk_peer_cred;
+    /*
+     * 套接字层接收超时，初始值为MAX_SCHEDULE_TIMEOUT。
+     * 可以通过套接字选项SO_RCVTIMEO来设置接收的超时时间。
+     * sock_init_data设置为无限大，也就是accept的时候默认是无限阻塞的，见inet_csk_accept
+     * 如果想设置为非阻塞，可以通过SO_RCVTIMEO参数设置
+     */
 	long			sk_rcvtimeo;
+    /*
+     * 在未启用SOCK_RCVTSTAMP套接字选项时，记录报文接收数据到
+     * 应用层的时间戳。在启用SOCK_RCVTSTAMP套接字选项时，接收
+     * 数据到应用层的时间戳记录在SKB的tstamp中
+     */
 	ktime_t			sk_stamp;
 #if BITS_PER_LONG==32
 	seqlock_t		sk_stamp_seq;
@@ -495,17 +785,35 @@ struct sock {
 				sk_txtime_report_errors : 1,
 				sk_txtime_unused : 6;
 
-	struct socket		*sk_socket;
+	struct socket		*sk_socket; /* 指向对应套接字的指针 */
 	void			*sk_user_data;
 #ifdef CONFIG_SECURITY
 	void			*sk_security;
 #endif
 	struct sock_cgroup_data	sk_cgrp_data;
 	struct mem_cgroup	*sk_memcg;
+    /*
+     * 当传输控制块的状态发生变化时，唤醒哪些等待本套接字的进程。
+     * 在创建套接字时初始化，IPv4中为sock_def_wakeup()  通常当传输 状态发生变化时调用
+     */
 	void			(*sk_state_change)(struct sock *sk);
+    /*
+     * 当有数据到达接收处理时，唤醒或发送信号通知准备读本套接字的进程。
+     * 在创建套接字时被初始化，IPv4中为sock_def_readable()。
+     * 如果是netlink套接字，则为netlink_data_ready()。 通常当传输控制块接收到数据包，存在可读的数据之后被调用
+     */
+    // 内核创建netlink sock的时候，对应的是netlink_kernel_create -> netlink_data_ready
 	void			(*sk_data_ready)(struct sock *sk);
 	void			(*sk_write_space)(struct sock *sk);
 	void			(*sk_error_report)(struct sock *sk);
+    /*
+     * 用于TCP和PPPoE中。在TCP中，用于接收预备队列和后备队列中的
+     * TCP段，TCP的sk_backlog_rcv接口为tcp_v4_do_rcv()。如果预备
+     * 队列中还存在TCP段，则调用 tcp_prequeue_process()预处理，在
+     * 该函数中会回调sk_backlog_rcv()。如果后备队列中还存在TCP段，
+     * 则调用release_sock()处理，也会回调sk_backlog_rcv()。该函数
+     * 指针在创建套接字的传输控制块时由传输层backlog_rcv接口初始化
+     */
 	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);
 #ifdef CONFIG_SOCK_VALIDATE_XMIT
@@ -971,7 +1279,7 @@ static inline bool sk_rcvqueues_full(const struct sock *sk, unsigned int limit)
 static inline __must_check int sk_add_backlog(struct sock *sk, struct sk_buff *skb,
 					      unsigned int limit)
 {
-	if (sk_rcvqueues_full(sk, limit))
+	if (sk_rcvqueues_full(sk, limit)) // backlog和sk_receive_queue中缓存使用是否超过限制
 		return -ENOBUFS;
 
 	/*
@@ -982,7 +1290,7 @@ static inline __must_check int sk_add_backlog(struct sock *sk, struct sk_buff *s
 	if (skb_pfmemalloc(skb) && !sock_flag(sk, SOCK_MEMALLOC))
 		return -ENOMEM;
 
-	__sk_add_backlog(sk, skb);
+	__sk_add_backlog(sk, skb); // 添加到backlog
 	sk->sk_backlog.len += skb->truesize;
 	return 0;
 }
@@ -1409,6 +1717,12 @@ struct socket_alloc {
 	struct inode vfs_inode;
 };
 
+// SOCKET_I() 得到的是 struct socket_alloc 的头指针
+// include/net/sock.h
+//struct socket_alloc {
+//    struct socket socket;
+//    struct inode vfs_inode;
+//};
 static inline struct socket *SOCKET_I(struct inode *inode)
 {
 	return &container_of(inode, struct socket_alloc, vfs_inode)->socket;
@@ -1472,6 +1786,10 @@ sk_rmem_schedule(struct sock *sk, struct sk_buff *skb, int size)
 {
 	if (!sk_has_account(sk))
 		return true;
+   // 使用宏SK_MEM_RECV表示此次是为接收而分配。
+   // 如果请求的缓存大小在预分配额度之内，可马上进行正常分配，
+   // 否则，由__sk_mem_schedule函数分配新的额度。
+   // 如果分配失败，但是此skb是由内存的PFMEMALLOC保留区分配而来，内核忽略之前的失败，返回成功
 	return size<= sk->sk_forward_alloc ||
 		__sk_mem_schedule(sk, size, SK_MEM_RECV) ||
 		skb_pfmemalloc(skb);
@@ -2187,9 +2505,9 @@ static inline void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 {
 	skb_orphan(skb);
 	skb->sk = sk;
-	skb->destructor = sock_rfree;
+	skb->destructor = sock_rfree; // 将skb的销毁回调函数destructor设置为sock_rfree函数
 	atomic_add(skb->truesize, &sk->sk_rmem_alloc);
-	sk_mem_charge(sk, skb->truesize);
+	sk_mem_charge(sk, skb->truesize);// 将skb占用的缓存回填到预分配额度sk_forward_alloc中
 }
 
 void sk_reset_timer(struct sock *sk, struct timer_list *timer,

@@ -110,17 +110,17 @@ struct socket_wq {
  *  @wq: wait queue for several uses
  */
 struct socket {
-	socket_state		state;
+	socket_state		state; // socket的状态，比如CONNECTED
 
 	short			type;
 
 	unsigned long		flags;
 
-	struct file		*file;
-	struct sock		*sk;
-	const struct proto_ops	*ops;
+	struct file		*file; // 与socket相关的指针列表
+	struct sock		*sk;   // 负责记录协议相关内容
+	const struct proto_ops	*ops; // 采用了和超级块设备操作表一样的逻辑，专门设置了一个数据结构来记录其允许的操作
 
-	struct socket_wq	wq;
+	struct socket_wq	wq; // 等待队列
 };
 
 struct vm_area_struct;

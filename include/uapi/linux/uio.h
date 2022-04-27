@@ -16,7 +16,9 @@
 
 struct iovec
 {
+    /* 要传输数据的用户态下的地址 */
 	void __user *iov_base;	/* BSD uses caddr_t (1003.1g requires void *) */
+    /* 要传输数据的长度 */
 	__kernel_size_t iov_len; /* Must be size_t (1003.1g) */
 };
 

@@ -229,6 +229,15 @@ static struct inode *alloc_inode(struct super_block *sb)
 	struct inode *inode;
 
 	if (ops->alloc_inode)
+	    /* 如果当前文件系统的超级块，有自己的分配inode的函数，则调用它自己的分配函数，
+	     * 否则从公用的高速缓存中分配一个inode.
+	     * 对于sokcet来说，在socket.c文件中，调用的函数为sock_alloc_inode
+　　       static const structsuper_operations sockfs_ops = {
+　　         .alloc_inode     =sock_alloc_inode,
+　　         .destroy_inode   =sock_destroy_inode,
+　　         .statfs          =simple_statfs,
+　　       };
+　　     */
 		inode = ops->alloc_inode(sb);
 	else
 		inode = kmem_cache_alloc(inode_cachep, GFP_KERNEL);

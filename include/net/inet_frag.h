@@ -74,21 +74,21 @@ struct frag_v6_compare_key {
  * @fqdir: pointer to struct fqdir
  * @rcu: rcu head for freeing deferall
  */
-struct inet_frag_queue {
+struct inet_frag_queue { // inet分段队列头
 	struct rhash_head	node;
 	union {
 		struct frag_v4_compare_key v4;
 		struct frag_v6_compare_key v6;
 	} key;
-	struct timer_list	timer;
-	spinlock_t		lock;
-	refcount_t		refcnt;
+	struct timer_list	timer; // 队列定时器，组装非常耗时，不能无休止的等待分片的到达
+	spinlock_t		lock;      // smp环境下 需要
+	refcount_t		refcnt;    // 计数器
 	struct rb_root		rb_fragments;
 	struct sk_buff		*fragments_tail;
 	struct sk_buff		*last_run_head;
-	ktime_t			stamp;
-	int			len;
-	int			meat;
+	ktime_t			stamp; // 时间戳
+	int			len;       // 数据包结束位置offset+len
+	int			meat;      // 与原数据长度的差距，如果和原数据包长度一样代表接收完成
 	__u8			flags;
 	u16			max_size;
 	struct fqdir		*fqdir;
@@ -96,12 +96,12 @@ struct inet_frag_queue {
 };
 
 struct inet_frags {
-	unsigned int		qsize;
+	unsigned int		qsize; // 队列长度
 
 	void			(*constructor)(struct inet_frag_queue *q,
 					       const void *arg);
 	void			(*destructor)(struct inet_frag_queue *);
-	void			(*frag_expire)(struct timer_list *t);
+	void			(*frag_expire)(struct timer_list *t); // 队列过期处理函数
 	struct kmem_cache	*frags_cachep;
 	const char		*frags_cache_name;
 	struct rhashtable_params rhash_params;

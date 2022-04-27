@@ -224,6 +224,7 @@ static inline int nf_hook(u_int8_t pf, unsigned int hook, struct net *net,
 #endif
 
 	rcu_read_lock();
+	 //根据传入的协议类型，及hook点，获取对应hook链的数组首地址
 	switch (pf) {
 	case NFPROTO_IPV4:
 		hook_head = rcu_dereference(net->nf.hooks_ipv4[hook]);
@@ -259,6 +260,7 @@ static inline int nf_hook(u_int8_t pf, unsigned int hook, struct net *net,
 		nf_hook_state_init(&state, hook, pf, indev, outdev,
 				   sk, net, okfn);
 
+		//最后进入nf_hook_slow函数流程
 		ret = nf_hook_slow(skb, &state, hook_head, 0);
 	}
 	rcu_read_unlock();

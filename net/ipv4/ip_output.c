@@ -104,6 +104,7 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	/* if egress device is enslaved to an L3 master device pass the
 	 * skb to its handler for processing
+	 * vrf发包实现
 	 */
 	skb = l3mdev_ip_out(sk, skb);
 	if (unlikely(!skb))
@@ -111,6 +112,8 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	skb->protocol = htons(ETH_P_IP);
 
+    // static inline int dst_output
+    // nf_hook如果返回1, 则表示包可以正常通过, 否则被拒绝, 无法发送出去
 	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
 		       net, sk, skb, NULL, skb_dst(skb)->dev,
 		       dst_output);
@@ -153,23 +156,23 @@ int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
 	skb_push(skb, sizeof(struct iphdr) + (opt ? opt->opt.optlen : 0));
 	skb_reset_network_header(skb);
 	iph = ip_hdr(skb);
-	iph->version  = 4;
-	iph->ihl      = 5;
-	iph->tos      = inet->tos;
-	iph->ttl      = ip_select_ttl(inet, &rt->dst);
-	iph->daddr    = (opt && opt->opt.srr ? opt->opt.faddr : daddr);
-	iph->saddr    = saddr;
-	iph->protocol = sk->sk_protocol;
+	iph->version  = 4;         // 版本
+	iph->ihl      = 5;         // 首部长度
+	iph->tos      = inet->tos; // 服务类型
+	iph->ttl      = ip_select_ttl(inet, &rt->dst); // 生存时间
+	iph->daddr    = (opt && opt->opt.srr ? opt->opt.faddr : daddr); // 目的ip
+	iph->saddr    = saddr; // 源ip
+	iph->protocol = sk->sk_protocol; // 协议
 	if (ip_dont_fragment(sk, &rt->dst)) {
 		iph->frag_off = htons(IP_DF);
 		iph->id = 0;
 	} else {
-		iph->frag_off = 0;
-		__ip_select_ident(net, iph, 1);
+		iph->frag_off = 0; // 3位标志 + 13位片偏移
+		__ip_select_ident(net, iph, 1); // 设置iph->id
 	}
 
 	if (opt && opt->opt.optlen) {
-		iph->ihl += opt->opt.optlen>>2;
+		iph->ihl += opt->opt.optlen>>2; // 更新首部长度
 		ip_options_build(skb, &opt->opt, daddr, rt, 0);
 	}
 
@@ -178,10 +181,18 @@ int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
 		skb->mark = sk->sk_mark;
 
 	/* Send it out. */
+    /* ip_local_out() -> __ip_local_out() -> ip_send_check()
+     * 在__ip_local_out()中设置iph->tot_len，在ip_send_check()中设置iph->check
+     */
 	return ip_local_out(net, skb->sk, skb);
 }
 EXPORT_SYMBOL_GPL(ip_build_and_send_pkt);
 
+/*
+ * 此函数通过另据子系统将数据包输出到网络设备。
+ * 先调用__ipv4_neigh_lookup_noref()从邻居表查找邻居，
+ * 如果没找到，则用__netgh_create新建一个。
+ */
 static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
@@ -219,12 +230,20 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 	}
 
 	rcu_read_lock_bh();
+    /* 从邻居表查找邻居 */
 	neigh = ip_neigh_for_gw(rt, skb, &is_v6gw);
+    /*
+     * 如果缓存了链路层的首部，则调用
+     * neigh_hh_output()输出数据包。否则，
+     * 若存在对应的邻居项，则通过邻居项的输出方式输出数据包。
+     * 最后调用二层函数，dev_queue_xmit()
+     */
 	if (!IS_ERR(neigh)) {
 		int res;
 
 		sock_confirm_neigh(skb, neigh);
 		/* if crossing protocols, can not use the cached header */
+		// 发包
 		res = neigh_output(neigh, skb, is_v6gw);
 		rcu_read_unlock_bh();
 		return res;
@@ -297,9 +316,15 @@ static int __ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *
 	}
 #endif
 	mtu = ip_skb_dst_mtu(sk, skb);
+    /* 支持gso的话用ip_finish_output_gso()函数 */
 	if (skb_is_gso(skb))
 		return ip_finish_output_gso(net, sk, skb, mtu);
 
+    /* 如果数据包长度大于MTU,则调用ip_fragment()对IP数据包进行分片处理
+     *
+     * 如果不支持TSO或者GSO,tcp发送的时候时按照mms来组织skb的，所以skb->len会等于mtu,
+     * 所以TCP叫分段，和IP分片不一样，只有UDP才有IP分片
+     */
 	if (skb->len > mtu || (IPCB(skb)->flags & IPSKB_FRAG_PMTU))
 		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
 
@@ -427,6 +452,7 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	skb->dev = dev;
 	skb->protocol = htons(ETH_P_IP);
 
+    /* 经过netfilter处理后，调用ip_finish_output()继续IP数据包的输出 */
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
 			    net, sk, skb, indev, dev,
 			    ip_finish_output,
@@ -447,7 +473,16 @@ static void ip_copy_addrs(struct iphdr *iph, const struct flowi4 *fl4)
 	       sizeof(fl4->saddr) + sizeof(fl4->daddr));
 }
 
-/* Note: skb->sk can be different from sk, in case of tunnels */
+/* Note: skb->sk can be different from sk, in case of tunnels
+ *
+ * 在TCP中，将TCP段打包成IP数据包的方法根据TCP类型的不同而有多种接口。
+ * 其中，最常用的就是ip_queue_xmit()，而ip_build_and_send_pkt()和
+ * ip_send_reply()只有在发送特定段时才会被调用
+ *
+ * @skb: 待封装成IP数据包的TCP段
+ *
+ * TCP发送的时候从tcp_transmit_skb函数里面跳转过来。
+ */
 int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		    __u8 tos)
 {
@@ -463,6 +498,11 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 	 * f.e. by something like SCTP.
 	 */
 	rcu_read_lock();
+    /*
+     * 如果待输出的数据包已准备好路由缓存，
+     * 则无需再查找路由，直接跳转到packet_routed
+     * 处作处理。
+     */
 	inet_opt = rcu_dereference(inet->inet_opt);
 	fl4 = &fl->u.ip4;
 	rt = skb_rtable(skb);
@@ -470,19 +510,26 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		goto packet_routed;
 
 	/* Make sure we can route this packet. */
+    /*
+     * 如果输出该数据包的传输控制块中缓存了输出路由缓存项，则需检测该路由缓存项是否过期。
+     * 如果过期，重新通过输出网络设备、目的地址、源地址等信息查找输出路由缓存项。
+     * 如果查找到对应的路由缓存项，则将其缓存到传输控制块中，否则丢弃该数据包。
+     * 如果未过期，则直接使用缓存在传输控制块中的路由缓存项。
+     */
 	rt = (struct rtable *)__sk_dst_check(sk, 0);
-	if (!rt) {
+	if (!rt) { /* 缓存过期 */
 		__be32 daddr;
 
 		/* Use correct destination address if we have options. */
-		daddr = inet->inet_daddr;
+		daddr = inet->inet_daddr; /* 目的地址 */
 		if (inet_opt && inet_opt->opt.srr)
-			daddr = inet_opt->opt.faddr;
+			daddr = inet_opt->opt.faddr; /* 严格路由选项 */
 
 		/* If this fails, retransmit mechanism of transport layer will
 		 * keep trying until route appears or the connection times
 		 * itself out.
 		 */
+        /* 查找路由缓存 */
 		rt = ip_route_output_ports(net, fl4, sk,
 					   daddr, inet->inet_saddr,
 					   inet->inet_dport,
@@ -492,18 +539,22 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 					   sk->sk_bound_dev_if);
 		if (IS_ERR(rt))
 			goto no_route;
-		sk_setup_caps(sk, &rt->dst);
+		sk_setup_caps(sk, &rt->dst); /* 设置控制块的路由缓存 */
 	}
-	skb_dst_set_noref(skb, &rt->dst);
+	skb_dst_set_noref(skb, &rt->dst); /* 将路由设置到skb中 */
 
 packet_routed:
 	if (inet_opt && inet_opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto no_route;
 
 	/* OK, we know where to send it, allocate and build IP header. */
+    /*
+     * 设置IP首部中各字段的值。如果存在IP选项，
+     * 则在IP数据包首部中构建IP选项。
+     */
 	skb_push(skb, sizeof(struct iphdr) + (inet_opt ? inet_opt->opt.optlen : 0));
 	skb_reset_network_header(skb);
-	iph = ip_hdr(skb);
+	iph = ip_hdr(skb); /* 构造ip头 */
 	*((__be16 *)iph) = htons((4 << 12) | (5 << 8) | (tos & 0xff));
 	if (ip_dont_fragment(sk, &rt->dst) && !skb->ignore_df)
 		iph->frag_off = htons(IP_DF);
@@ -514,7 +565,7 @@ packet_routed:
 	ip_copy_addrs(iph, fl4);
 
 	/* Transport layer set skb->h.foo itself. */
-
+    /* 构造ip选项 */
 	if (inet_opt && inet_opt->opt.optlen) {
 		iph->ihl += inet_opt->opt.optlen >> 2;
 		ip_options_build(skb, &inet_opt->opt, inet->inet_daddr, rt, 0);
@@ -524,15 +575,23 @@ packet_routed:
 			     skb_shinfo(skb)->gso_segs ?: 1);
 
 	/* TODO : should we use skb->sk here instead of sk ? */
+    /*
+     * 设置输出数据包的QoS类型。
+     */
 	skb->priority = sk->sk_priority;
 	skb->mark = sk->sk_mark;
 
+	// 发送报文
 	res = ip_local_out(net, sk, skb);
 	rcu_read_unlock();
 	return res;
 
 no_route:
 	rcu_read_unlock();
+    /*
+     * 如果查找不到对应的路由缓存项，
+     * 在此处理，将该数据包丢弃。
+     */
 	IP_INC_STATS(net, IPSTATS_MIB_OUTNOROUTES);
 	kfree_skb(skb);
 	return -EHOSTUNREACH;

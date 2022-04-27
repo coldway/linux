@@ -53,15 +53,15 @@ static int gro_cell_poll(struct napi_struct *napi, int budget)
 	struct sk_buff *skb;
 	int work_done = 0;
 
-	while (work_done < budget) {
-		skb = __skb_dequeue(&cell->napi_skbs);
+	while (work_done < budget) { // 小于配额就不断接收
+		skb = __skb_dequeue(&cell->napi_skbs); // 从队列中取出一个分组
 		if (!skb)
-			break;
-		napi_gro_receive(napi, skb);
-		work_done++;
+			break; // 接收完，退出
+		napi_gro_receive(napi, skb); // 接收
+		work_done++; // 接收分组计数
 	}
 
-	if (work_done < budget)
+	if (work_done < budget) // 如果分组处理完成，则退出poll
 		napi_complete_done(napi, work_done);
 	return work_done;
 }

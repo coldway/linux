@@ -488,7 +488,7 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
 	newtp->snd_up = seq;
 
 	INIT_LIST_HEAD(&newtp->tsq_node);
-	INIT_LIST_HEAD(&newtp->tsorted_sent_queue);
+	INIT_LIST_HEAD(&newtp->tsorted_sent_queue); // 初始化子套接口的tsorted链表
 
 	tcp_init_wl(newtp, treq->rcv_isn);
 
@@ -574,7 +574,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	struct tcp_options_received tmp_opt;
 	struct sock *child;
 	const struct tcphdr *th = tcp_hdr(skb);
-	__be32 flg = tcp_flag_word(th) & (TCP_FLAG_RST|TCP_FLAG_SYN|TCP_FLAG_ACK);
+	__be32 flg = tcp_flag_word(th) & (TCP_FLAG_RST|TCP_FLAG_SYN|TCP_FLAG_ACK); // RSA
 	bool paws_reject = false;
 	bool own_req;
 
@@ -598,7 +598,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	/* Check for pure retransmitted SYN. */
 	if (TCP_SKB_CB(skb)->seq == tcp_rsk(req)->rcv_isn &&
 	    flg == TCP_FLAG_SYN &&
-	    !paws_reject) {
+	    !paws_reject) { // 若是重传syn包
 		/*
 		 * RFC793 draws (Incorrectly! It was fixed in RFC1122)
 		 * this case on figure 6 and figure 8, but formal
@@ -626,7 +626,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 					  LINUX_MIB_TCPACKSKIPPEDSYNRECV,
 					  &tcp_rsk(req)->last_oow_ack_time) &&
 
-		    !inet_rtx_syn_ack(sk, req)) {
+		    !inet_rtx_syn_ack(sk, req)) { // 调用了tcp_rtx_synack()
 			unsigned long expires = jiffies;
 
 			expires += min(TCP_TIMEOUT_INIT << req->num_timeout,
@@ -698,7 +698,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	 */
 	if ((flg & TCP_FLAG_ACK) && !fastopen &&
 	    (TCP_SKB_CB(skb)->ack_seq !=
-	     tcp_rsk(req)->snt_isn + 1))
+	     tcp_rsk(req)->snt_isn + 1)) // 若ack置位但ack_seq不对
 		return sk;
 
 	/* Also, it would be not so bad idea to check rcv_tsecr, which
@@ -711,11 +711,11 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	if (paws_reject || !tcp_in_window(TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq,
 					  tcp_rsk(req)->rcv_nxt, tcp_rsk(req)->rcv_nxt + req->rsk_rcv_wnd)) {
 		/* Out of window: send ACK and drop. */
-		if (!(flg & TCP_FLAG_RST) &&
+		if (!(flg & TCP_FLAG_RST) && // 若rst未置位
 		    !tcp_oow_rate_limited(sock_net(sk), skb,
 					  LINUX_MIB_TCPACKSKIPPEDSYNRECV,
 					  &tcp_rsk(req)->last_oow_ack_time))
-			req->rsk_ops->send_ack(sk, skb, req);
+			req->rsk_ops->send_ack(sk, skb, req); // tcp_v4_reqsk_send_ack()
 		if (paws_reject)
 			__NET_INC_STATS(sock_net(sk), LINUX_MIB_PAWSESTABREJECTED);
 		return NULL;
@@ -735,7 +735,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	/* RFC793: "second check the RST bit" and
 	 *	   "fourth, check the SYN bit"
 	 */
-	if (flg & (TCP_FLAG_RST|TCP_FLAG_SYN)) {
+	if (flg & (TCP_FLAG_RST|TCP_FLAG_SYN)) { // 若rst或syn置位
 		__TCP_INC_STATS(sock_net(sk), TCP_MIB_ATTEMPTFAILS);
 		goto embryonic_reset;
 	}
@@ -746,7 +746,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	 * XXX (TFO) - if we ever allow "data after SYN", the
 	 * following check needs to be removed.
 	 */
-	if (!(flg & TCP_FLAG_ACK))
+	if (!(flg & TCP_FLAG_ACK)) // 若ack未置位
 		return NULL;
 
 	/* For Fast Open no more processing is needed (sk is the
@@ -769,6 +769,8 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	 * ESTABLISHED STATE. If it will be dropped after
 	 * socket is created, wait for troubles.
 	 */
+    /* tcp_v4_syn_recv_sock() -> tcp_create_openreq_child() -> inet_csk_clone()
+      创建子传输控制块，在inet_csk_clone()中设置state为TCP_SYN_RECV */
 	child = inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, NULL,
 							 req, &own_req);
 	if (!child)
@@ -776,7 +778,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 
 	if (own_req && rsk_drop_req(req)) {
 		reqsk_queue_removed(&inet_csk(sk)->icsk_accept_queue, req);
-		inet_csk_reqsk_queue_drop_and_put(sk, req);
+		inet_csk_reqsk_queue_drop_and_put(sk, req); // 将tcp_request_sock移出半连接队列,移入全连接队列
 		return child;
 	}
 

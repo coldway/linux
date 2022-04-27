@@ -94,7 +94,7 @@ struct bbr {
 	struct minmax bw;	/* Max recent delivery rate in pkts/uS << 24 */
 	u32	rtt_cnt;	    /* count of packet-timed rounds elapsed */
 	u32     next_rtt_delivered; /* scb->tx.delivered at end of round */
-	u64	cycle_mstamp;	     /* time of this cycle phase start */
+	u64	cycle_mstamp;	     /* time of this cycle phase start */ /* 周期阶段的开始 */
 	u32     mode:3,		     /* current bbr_mode in state machine */
 		prev_ca_state:3,     /* CA state on previous ACK */
 		packet_conservation:1,  /* use packet conservation? */
@@ -110,14 +110,14 @@ struct bbr {
 	u32	lt_last_stamp;	     /* LT intvl start: tp->delivered_mstamp */
 	u32	lt_last_lost;	     /* LT intvl start: tp->lost */
 	u32	pacing_gain:10,	/* current gain for setting pacing rate */
-		cwnd_gain:10,	/* current gain for setting cwnd */
+		cwnd_gain:10,	/* current gain for setting cwnd */ /* cnwd当前增益 */
 		full_bw_reached:1,   /* reached full bw in Startup? */
 		full_bw_cnt:2,	/* number of rounds without large bw gains */
 		cycle_idx:3,	/* current index in pacing_gain cycle array */
 		has_seen_rtt:1, /* have we seen an RTT sample yet? */
 		unused_b:5;
-	u32	prior_cwnd;	/* prior cwnd upon entering loss recovery */
-	u32	full_bw;	/* recent bw, to estimate if pipe is full */
+	u32	prior_cwnd;	/* prior cwnd upon entering loss recovery */ /* 之前的cwnd */
+	u32	full_bw;	/* recent bw, to estimate if pipe is full */ /* 最近bw，估计管道是否满 */
 
 	/* For tracking ACK aggregation: */
 	u64	ack_epoch_mstamp;	/* start of ACK sampling epoch */
@@ -281,10 +281,12 @@ static void bbr_init_pacing_rate_from_rtt(struct sock *sk)
 		rtt_us = max(tp->srtt_us >> 3, 1U);
 		bbr->has_seen_rtt = 1;
 	} else {			 /* no RTT sample yet */
+        // 平滑往返时间为零，rtt_us使用缺省的USEC_PER_MSEC（1000）
 		rtt_us = USEC_PER_MSEC;	 /* use nominal default RTT */
 	}
 	bw = (u64)tp->snd_cwnd * BW_UNIT;
 	do_div(bw, rtt_us);
+	// 带宽的值bw由发送拥塞窗口乘以BW_UNIT，在除以rtt_us值得到
 	sk->sk_pacing_rate = bbr_bw_to_pacing_rate(sk, bw, bbr_high_gain);
 }
 
@@ -297,6 +299,7 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
+	// 带宽已占满，或者计算的pacing速率大于当前使用的速率sk_pacing_rate，更新当前速率
 	if (bbr_full_bw_reached(sk) || rate > sk->sk_pacing_rate)
 		sk->sk_pacing_rate = rate;
 }
@@ -764,6 +767,12 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 }
 
 /* Estimate the bandwidth based on how fast packets are delivered */
+/*
+ * 估算实际的带宽
+    1、更新RTT周期
+    2、计算带宽=确认的字节数*BW_UNIT/采样时间
+    3、带宽和minirtt样本加入新的rtt、bw样本
+ */
 static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -771,23 +780,30 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	u64 bw;
 
 	bbr->round_start = 0;
+    // 无效数据
 	if (rs->delivered < 0 || rs->interval_us <= 0)
 		return; /* Not a valid observation */
 
 	/* See if we've reached the next RTT */
+    // 判断是否到达下一个rtt
 	if (!before(rs->prior_delivered, bbr->next_rtt_delivered)) {
+        // 更新rtt
 		bbr->next_rtt_delivered = tp->delivered;
 		bbr->rtt_cnt++;
 		bbr->round_start = 1;
 		bbr->packet_conservation = 0;
 	}
 
+    // 令牌桶监管
 	bbr_lt_bw_sampling(sk, rs);
 
 	/* Divide delivered by the interval to find a (lower bound) bottleneck
 	 * bandwidth sample. Delivered is in packets and interval_us in uS and
 	 * ratio will be <<1 for most connections. So delivered is first scaled.
 	 */
+    // rs->delivered:   采样期间已确认的字节数
+    // rs->interval_us: 采样时间
+    // 带宽 = 确认的字节数 * BW_UNIT / 采样时间
 	bw = div64_long((u64)rs->delivered * BW_UNIT, rs->interval_us);
 
 	/* If this sample is application-limited, it is likely to have a very
@@ -801,8 +817,10 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	 * network rate no matter how long. We automatically leave this
 	 * phase when app writes faster than the network can deliver :)
 	 */
+    // 加入新的样本
 	if (!rs->is_app_limited || bw >= bbr_max_bw(sk)) {
 		/* Incorporate new sample into our max bw filter. */
+		/* 带宽和minirtt样本加入新的rtt、bw样本 */
 		minmax_running_max(&bbr->bw, bbr_bw_rtts, bbr->rtt_cnt, bw);
 	}
 }
@@ -832,9 +850,9 @@ static void bbr_update_ack_aggregation(struct sock *sk,
 		return;
 
 	if (bbr->round_start) {
-		bbr->extra_acked_win_rtts = min(0x1F,
+		bbr->extra_acked_win_rtts = min(0x1F,   // 防止溢出
 						bbr->extra_acked_win_rtts + 1);
-		if (bbr->extra_acked_win_rtts >= bbr_extra_acked_win_rtts) {
+		if (bbr->extra_acked_win_rtts >= bbr_extra_acked_win_rtts) { // 每5个rtt作为一轮参与计算。
 			bbr->extra_acked_win_rtts = 0;
 			bbr->extra_acked_win_idx = bbr->extra_acked_win_idx ?
 						   0 : 1;
@@ -844,13 +862,15 @@ static void bbr_update_ack_aggregation(struct sock *sk,
 
 	/* Compute how many packets we expected to be delivered over epoch. */
 	epoch_us = tcp_stamp_us_delta(tp->delivered_mstamp,
-				      bbr->ack_epoch_mstamp);
-	expected_acked = ((u64)bbr_bw(sk) * epoch_us) / BW_UNIT;
+				      bbr->ack_epoch_mstamp); // epoch_us : 交付时间 - 采样开始的时间
+	expected_acked = ((u64)bbr_bw(sk) * epoch_us) / BW_UNIT; // 计算预期的ack
 
 	/* Reset the aggregation epoch if ACK rate is below expected rate or
 	 * significantly large no. of ack received since epoch (potentially
 	 * quite old epoch).
 	 */
+    // 只有从开始收到比预期多的ACK，SACK时才开始计时。另外，太多也不行。
+    // 重置周期
 	if (bbr->ack_epoch_acked <= expected_acked ||
 	    (bbr->ack_epoch_acked + rs->acked_sacked >=
 	     bbr_ack_epoch_acked_reset_thresh)) {
@@ -860,10 +880,11 @@ static void bbr_update_ack_aggregation(struct sock *sk,
 	}
 
 	/* Compute excess data delivered, beyond what was expected. */
-	bbr->ack_epoch_acked = min_t(u32, 0xFFFFF,
-				     bbr->ack_epoch_acked + rs->acked_sacked);
-	extra_acked = bbr->ack_epoch_acked - expected_acked;
-	extra_acked = min(extra_acked, tp->snd_cwnd);
+	bbr->ack_epoch_acked = min_t(u32, 0xFFFFF,                 // 防止溢出（ack_epoch_acked：20）
+				     bbr->ack_epoch_acked + rs->acked_sacked); // ack + sack
+	extra_acked = bbr->ack_epoch_acked - expected_acked; // 计算超出预期的多余数据
+	extra_acked = min(extra_acked, tp->snd_cwnd);        // 选择与发送阻塞窗口较小值
+    // 加入到容器以供set cwnd逻辑来取值。
 	if (extra_acked > bbr->extra_acked[bbr->extra_acked_win_idx])
 		bbr->extra_acked[bbr->extra_acked_win_idx] = extra_acked;
 }
@@ -887,11 +908,15 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 
 	bw_thresh = (u64)bbr->full_bw * bbr_full_bw_thresh >> BBR_SCALE;
 	if (bbr_max_bw(sk) >= bw_thresh) {
+	    // bw有增加，bw未增加数置0，同时更新fullbw为bw
+	    // bw需要膨胀1.25倍才会被认为是有增加
 		bbr->full_bw = bbr_max_bw(sk);
 		bbr->full_bw_cnt = 0;
 		return;
 	}
+	// bw未增加，full_bw_cnt++
 	++bbr->full_bw_cnt;
+	// 三次带宽也就是bw没有增加。记录需要排空管道
 	bbr->full_bw_reached = bbr->full_bw_cnt >= bbr_full_bw_cnt;
 }
 
@@ -901,13 +926,15 @@ static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 	struct bbr *bbr = inet_csk_ca(sk);
 
 	if (bbr->mode == BBR_STARTUP && bbr_full_bw_reached(sk)) {
+	    // 经过三轮bw没有增长，直接进入drain模式，清空queue
 		bbr->mode = BBR_DRAIN;	/* drain queue we created */
 		tcp_sk(sk)->snd_ssthresh =
 				bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT);
 	}	/* fall through to check if in-flight is already small: */
 	if (bbr->mode == BBR_DRAIN &&
 	    bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tcp_sk(sk))) <=
-	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT))
+	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT)) // drain模式且inflight小于 当前最大BDP管道
+	    // 进入稳定状态 同时进入gain cycle循环
 		bbr_reset_probe_bw_mode(sk);  /* we estimate queue is drained */
 }
 
@@ -951,6 +978,7 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 	bool filter_expired;
 
 	/* Track min RTT seen in the min_rtt_win_sec filter window: */
+	/* 判断是否连续10s没有更新最小rtt */
 	filter_expired = after(tcp_jiffies32,
 			       bbr->min_rtt_stamp + bbr_min_rtt_win_sec * HZ);
 	if (rs->rtt_us >= 0 &&
@@ -961,13 +989,13 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 	}
 
 	if (bbr_probe_rtt_mode_ms > 0 && filter_expired &&
-	    !bbr->idle_restart && bbr->mode != BBR_PROBE_RTT) {
-		bbr->mode = BBR_PROBE_RTT;  /* dip, drain queue */
+	    !bbr->idle_restart && bbr->mode != BBR_PROBE_RTT) { // 连续10s没有更新最小rtt且不为rtt mode
+		bbr->mode = BBR_PROBE_RTT;  /* dip, drain queue */ // 进入探测rtt mode
 		bbr_save_cwnd(sk);  /* note cwnd so we can restore it */
 		bbr->probe_rtt_done_stamp = 0;
 	}
 
-	if (bbr->mode == BBR_PROBE_RTT) {
+	if (bbr->mode == BBR_PROBE_RTT) { // 如果是probe_rtt状态
 		/* Ignore low rate samples during this mode. */
 		tp->app_limited =
 			(tp->delivered + tcp_packets_in_flight(tp)) ? : 1;
@@ -1021,12 +1049,12 @@ static void bbr_update_gains(struct sock *sk)
 
 static void bbr_update_model(struct sock *sk, const struct rate_sample *rs)
 {
-	bbr_update_bw(sk, rs);
-	bbr_update_ack_aggregation(sk, rs);
-	bbr_update_cycle_phase(sk, rs);
-	bbr_check_full_bw_reached(sk, rs);
-	bbr_check_drain(sk, rs);
-	bbr_update_min_rtt(sk, rs);
+	bbr_update_bw(sk, rs);             // 根据发送数据包的速度估计带宽
+	bbr_update_ack_aggregation(sk, rs);// ack静默期间，提供额外的inflight数据
+	bbr_update_cycle_phase(sk, rs);    // 增益循环
+	bbr_check_full_bw_reached(sk, rs); // 检查管道是否已满
+	bbr_check_drain(sk, rs);    // 如果管道可能已满，则排空队列，然后进入稳定状态
+	bbr_update_min_rtt(sk, rs); // 更新最小RTT
 	bbr_update_gains(sk);
 }
 
@@ -1038,8 +1066,8 @@ static void bbr_main(struct sock *sk, const struct rate_sample *rs)
 	bbr_update_model(sk, rs);
 
 	bw = bbr_bw(sk);
-	bbr_set_pacing_rate(sk, bw, bbr->pacing_gain);
-	bbr_set_cwnd(sk, rs, rs->acked_sacked, bw, bbr->cwnd_gain);
+	bbr_set_pacing_rate(sk, bw, bbr->pacing_gain);             // 设置速度
+	bbr_set_cwnd(sk, rs, rs->acked_sacked, bw, bbr->cwnd_gain);// 设置cwnd
 }
 
 static void bbr_init(struct sock *sk)

@@ -438,6 +438,12 @@ static inline void dst_set_expires(struct dst_entry *dst, int timeout)
 }
 
 /* Output packet to network from transport.  */
+/*
+ * 在output的值在 struct rtable *rt_dst_alloc(struct net_device *dev 函数中初始化
+ * output()函数：
+ * 1、如果是单播数据包，设置的是 int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb);
+ * 2、如果是组播数据包，设置的是ip_mc_output();
+ */
 static inline int dst_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	return skb_dst(skb)->output(net, sk, skb);

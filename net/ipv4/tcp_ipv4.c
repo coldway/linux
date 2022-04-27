@@ -202,17 +202,21 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	__be16 orig_sport, orig_dport;
 	__be32 daddr, nexthop;
 	struct flowi4 *fl4;
+    // 指向高速缓冲区的路由
 	struct rtable *rt;
 	int err;
 	struct ip_options_rcu *inet_opt;
 	struct inet_timewait_death_row *tcp_death_row = &sock_net(sk)->ipv4.tcp_death_row;
 
+    // 地址长度检查
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
+    // 协议族检查
 	if (usin->sin_family != AF_INET)
 		return -EAFNOSUPPORT;
 
+    // 是否设置源路由选项
 	nexthop = daddr = usin->sin_addr.s_addr;
 	inet_opt = rcu_dereference_protected(inet->inet_opt,
 					     lockdep_sock_is_held(sk));
@@ -225,6 +229,8 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	orig_sport = inet->inet_sport;
 	orig_dport = usin->sin_port;
 	fl4 = &inet->cork.fl.u.ip4;
+    // 选路由，根据目的ip、目的端口、网络设备接口调用ip_route_connect选路由，
+    // 路由结构保存到rt->rt_dst中，实际调用的函数是ip_route_output_flow
 	rt = ip_route_connect(fl4, nexthop, inet->inet_saddr,
 			      RT_CONN_FLAGS(sk), sk->sk_bound_dev_if,
 			      IPPROTO_TCP,
@@ -236,11 +242,13 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		return err;
 	}
 
+    // 组传送地址、广播地址则返回错误
 	if (rt->rt_flags & (RTCF_MULTICAST | RTCF_BROADCAST)) {
 		ip_rt_put(rt);
 		return -ENETUNREACH;
 	}
 
+    // 如果没有设置源路由ip选项，就使用路由表寻址的路由
 	if (!inet_opt || !inet_opt->opt.srr)
 		daddr = fl4->daddr;
 
@@ -248,6 +256,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		inet->inet_saddr = fl4->saddr;
 	sk_rcv_saddr_set(sk, inet->inet_saddr);
 
+    // 获取套接字最近使用的时间
 	if (tp->rx_opt.ts_recent_stamp && inet->inet_daddr != daddr) {
 		/* Reset inherited state */
 		tp->rx_opt.ts_recent	   = 0;
@@ -270,13 +279,16 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	 * lock select source port, enter ourselves into the hash tables and
 	 * complete initialization after this.
 	 */
+    // 设置套接字状态为TCP_SYN_SENT
 	tcp_set_state(sk, TCP_SYN_SENT);
+    // 将套接字sk放入TCP连接管理哈希链表中
 	err = inet_hash_connect(tcp_death_row, sk);
 	if (err)
 		goto failure;
 
 	sk_set_txhash(sk);
 
+    // 为连接分配一个临时端口
 	rt = ip_route_newports(fl4, rt, orig_sport, orig_dport,
 			       inet->inet_sport, inet->inet_dport, sk);
 	if (IS_ERR(rt)) {
@@ -291,6 +303,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	if (likely(!tp->repair)) {
 		if (!tp->write_seq)
+            // 初始化TCP数据段序列号
 			WRITE_ONCE(tp->write_seq,
 				   secure_tcp_seq(inet->inet_saddr,
 						  inet->inet_daddr,
@@ -308,6 +321,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (err)
 		goto failure;
 
+    // 构建SYN包调用tcp_transmit_skb发送到IP层
 	err = tcp_connect(sk);
 
 	if (err)
@@ -320,6 +334,7 @@ failure:
 	 * This unhashes the socket and releases the local port,
 	 * if necessary.
 	 */
+    // 失败设置套接字状态为CLOSED
 	tcp_set_state(sk, TCP_CLOSE);
 	ip_rt_put(rt);
 	sk->sk_route_caps = 0;
@@ -975,7 +990,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 	if (!dst && (dst = inet_csk_route_req(sk, &fl4, req)) == NULL)
 		return -1;
 
-	skb = tcp_make_synack(sk, dst, req, foc, synack_type);
+	skb = tcp_make_synack(sk, dst, req, foc, synack_type); // 创建SYN+ACK包
 
 	if (skb) {
 		__tcp_v4_send_check(skb, ireq->ir_loc_addr, ireq->ir_rmt_addr);
@@ -983,7 +998,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 		rcu_read_lock();
 		err = ip_build_and_send_pkt(skb, sk, ireq->ir_loc_addr,
 					    ireq->ir_rmt_addr,
-					    rcu_dereference(ireq->ireq_opt));
+					    rcu_dereference(ireq->ireq_opt)); // 创建IP包并发送
 		rcu_read_unlock();
 		err = net_xmit_eval(err);
 	}
@@ -1467,6 +1482,7 @@ const struct tcp_request_sock_ops tcp_request_sock_ipv4_ops = {
 int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 {
 	/* Never answer to SYNs send to broadcast or multicast */
+    // 若是广/组播包，丢包
 	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		goto drop;
 
@@ -1501,10 +1517,10 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 #endif
 	struct ip_options_rcu *inet_opt;
 
-	if (sk_acceptq_is_full(sk))
+	if (sk_acceptq_is_full(sk)) // 若全连接队列满
 		goto exit_overflow;
 
-	newsk = tcp_create_openreq_child(sk, req, skb);
+	newsk = tcp_create_openreq_child(sk, req, skb); // 创建子传输控制块
 	if (!newsk)
 		goto exit_nonewsk;
 
@@ -1517,7 +1533,7 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 	sk_daddr_set(newsk, ireq->ir_rmt_addr);
 	sk_rcv_saddr_set(newsk, ireq->ir_loc_addr);
 	newsk->sk_bound_dev_if = ireq->ir_iif;
-	newinet->inet_saddr   = ireq->ir_loc_addr;
+	newinet->inet_saddr   = ireq->ir_loc_addr; // 源ip
 	inet_opt	      = rcu_dereference(ireq->ireq_opt);
 	RCU_INIT_POINTER(newinet->inet_opt, inet_opt);
 	newinet->mc_index     = inet_iif(skb);
@@ -1529,7 +1545,7 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 	newinet->inet_id = prandom_u32();
 
 	if (!dst) {
-		dst = inet_csk_route_child_sock(sk, newsk, req);
+		dst = inet_csk_route_child_sock(sk, newsk, req); // 查找路由
 		if (!dst)
 			goto put_and_exit;
 	} else {
@@ -1564,14 +1580,14 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 
 	if (__inet_inherit_port(sk, newsk) < 0)
 		goto put_and_exit;
-	*own_req = inet_ehash_nolisten(newsk, req_to_sk(req_unhash));
+	*own_req = inet_ehash_nolisten(newsk, req_to_sk(req_unhash)); // 将newsk加入ehash
 	if (likely(*own_req)) {
 		tcp_move_syn(newtp, req);
 		ireq->ireq_opt = NULL;
 	} else {
 		newinet->inet_opt = NULL;
 	}
-	return newsk;
+	return newsk; // return newsk
 
 exit_overflow:
 	NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
@@ -1646,20 +1662,28 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 		goto csum_err;
 
 	if (sk->sk_state == TCP_LISTEN) {
+        // 说明收到的是三次握手第一步SYN或者第三步ACK,这里是服务器端的情况
+
+        // syncookie检查，因为没有syn包没有ack选项，因此忽略， 如果syncookie验证通过则创建新的
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 
 		if (!nsk)
 			goto discard;
+        /* 如果是第一次握手的SYN，这里的nsk应该是'父'sk,
+         * 如果这里是三次握手的第三步ACK，则这里的nsk是‘子'sk
+         */
 		if (nsk != sk) {
-			if (tcp_child_process(sk, nsk, skb)) {
+			if (tcp_child_process(sk, nsk, skb)) {// tcp_child_process还是会调用tcp_rcv_state_proces
 				rsk = nsk;
 				goto reset;
 			}
+            // 如果是握手的第三步，这里直接退出
 			return 0;
-		}
+		} // 如果是三次握手中的第一步SYN，则继续后面的操作
 	} else
 		sock_rps_save_rxhash(sk, skb);
 
+    //走到这里说明只能是客户端收到SYN+ACK,或者是服务器端收到SYN
 	if (tcp_rcv_state_process(sk, skb)) {
 		rsk = sk;
 		goto reset;
@@ -1862,16 +1886,22 @@ static void tcp_v4_fill_cb(struct sk_buff *skb, const struct iphdr *iph,
 	/* This is tricky : We move IPCB at its correct location into TCP_SKB_CB()
 	 * barrier() makes sure compiler wont play fool^Waliasing games.
 	 */
+    /* 移动ipcb */
 	memmove(&TCP_SKB_CB(skb)->header.h4, IPCB(skb),
 		sizeof(struct inet_skb_parm));
 	barrier();
 
+    /* 获取开始序号*/
 	TCP_SKB_CB(skb)->seq = ntohl(th->seq);
+    /* 获取结束序号，syn与fin各占1  */
 	TCP_SKB_CB(skb)->end_seq = (TCP_SKB_CB(skb)->seq + th->syn + th->fin +
 				    skb->len - th->doff * 4);
+    /* 获取确认序号 */
 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
+    /* 获取标记字节，tcp首部第14个字节 */
 	TCP_SKB_CB(skb)->tcp_flags = tcp_flag_byte(th);
 	TCP_SKB_CB(skb)->tcp_tw_isn = 0;
+    /* 获取ip头的服务字段 */
 	TCP_SKB_CB(skb)->ip_dsfield = ipv4_get_dsfield(iph);
 	TCP_SKB_CB(skb)->sacked	 = 0;
 	TCP_SKB_CB(skb)->has_rxtstamp =
@@ -1894,19 +1924,24 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	struct sock *sk;
 	int ret;
 
+    /* 非本机 */
 	if (skb->pkt_type != PACKET_HOST)
 		goto discard_it;
 
 	/* Count it even if it's bad */
 	__TCP_INC_STATS(net, TCP_MIB_INSEGS);
 
+    /* 检查头部数据，若不满足，则拷贝分片 */
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		goto discard_it;
 
+    /* 取tcp头 */
 	th = (const struct tcphdr *)skb->data;
 
+    /* 长度过小 */
 	if (unlikely(th->doff < sizeof(struct tcphdr) / 4))
 		goto bad_packet;
+    /* 检查头部数据，若不满足，则拷贝分片 */
 	if (!pskb_may_pull(skb, th->doff * 4))
 		goto discard_it;
 
@@ -1918,23 +1953,29 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
 		goto csum_error;
 
+    /* 取tcp头 */
 	th = (const struct tcphdr *)skb->data;
+    /* 取ip头 */
 	iph = ip_hdr(skb);
 lookup:
+    /* 查找控制块 */
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
 			       th->dest, sdif, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
 
 process:
+    /* TIME_WAIT转过去处理 */
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
 
+    /* TCP_NEW_SYN_RECV状态处理 */
 	if (sk->sk_state == TCP_NEW_SYN_RECV) {
 		struct request_sock *req = inet_reqsk(sk);
 		bool req_stolen = false;
 		struct sock *nsk;
 
+        /* 获取控制块 */
 		sk = req->rsk_listener;
 		if (unlikely(tcp_v4_inbound_md5_hash(sk, skb, dif, sdif))) {
 			sk_drops_add(sk, skb);
@@ -1945,8 +1986,11 @@ process:
 			reqsk_put(req);
 			goto csum_error;
 		}
+        /* 不是listen状态 */
 		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+            /* 从连接队列移除控制块 */
 			inet_csk_reqsk_queue_drop_and_put(sk, req);
+            /* 根据skb参数重新查找控制块 */
 			goto lookup;
 		}
 		/* We own a reference on the listener, increase it again
@@ -1959,8 +2003,10 @@ process:
 			th = (const struct tcphdr *)skb->data;
 			iph = ip_hdr(skb);
 			tcp_v4_fill_cb(skb, iph, th);
+            /* 处理第三次握手ack，成功返回新控制块 */
 			nsk = tcp_check_req(sk, skb, req, false, &req_stolen);
 		}
+        /* 失败 */
 		if (!nsk) {
 			reqsk_put(req);
 			if (req_stolen) {
@@ -1975,10 +2021,13 @@ process:
 			}
 			goto discard_and_relse;
 		}
+        /* 未新建控制块，进一步处理 */
 		if (nsk == sk) {
 			reqsk_put(req);
 			tcp_v4_restore_cb(skb);
+		/* 有新建控制块，进行初始化等 */
 		} else if (tcp_child_process(sk, nsk, skb)) {
+            /* 失败发送rst */
 			tcp_v4_send_reset(nsk, skb);
 			goto discard_and_relse;
 		} else {
@@ -1986,6 +2035,10 @@ process:
 			return 0;
 		}
 	}
+
+    /* TIME_WAIT和TCP_NEW_SYN_RECV以外的状态 */
+
+    /* ttl错误 */
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
 		__NET_INC_STATS(net, LINUX_MIB_TCPMINTTLDROP);
 		goto discard_and_relse;
@@ -1997,31 +2050,42 @@ process:
 	if (tcp_v4_inbound_md5_hash(sk, skb, dif, sdif))
 		goto discard_and_relse;
 
+    /* 初始化nf成员 */
 	nf_reset_ct(skb);
 
+    /* tcp过滤 */
 	if (tcp_filter(sk, skb))
 		goto discard_and_relse;
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
 	tcp_v4_fill_cb(skb, iph, th);
 
+    /* 清空设备 */
 	skb->dev = NULL;
 
+    /* LISTEN状态处理 */
 	if (sk->sk_state == TCP_LISTEN) {
 		ret = tcp_v4_do_rcv(sk, skb);
 		goto put_and_return;
 	}
 
+    /* TIME_WAIT和TCP_NEW_SYN_RECV和LISTEN以外的状态 */
+
+    /* 记录cpu */
 	sk_incoming_cpu_update(sk);
 
 	bh_lock_sock_nested(sk);
+    /* 分段统计 */
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
+    /* 未被用户锁定 */
 	if (!sock_owned_by_user(sk)) {
 		skb_to_free = sk->sk_rx_skb_cache;
 		sk->sk_rx_skb_cache = NULL;
+        /* 进入tcpv4处理 */
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else {
+        /* 已经被用户锁定，加入到backlog */
 		if (tcp_add_backlog(sk, skb))
 			goto discard_and_relse;
 		skb_to_free = NULL;
@@ -2031,6 +2095,7 @@ process:
 		__kfree_skb(skb_to_free);
 
 put_and_return:
+    /* 减少引用计数 */
 	if (refcounted)
 		sock_put(sk);
 
@@ -2048,6 +2113,7 @@ csum_error:
 bad_packet:
 		__TCP_INC_STATS(net, TCP_MIB_INERRS);
 	} else {
+        /* 发送rst */
 		tcp_v4_send_reset(NULL, skb);
 	}
 
@@ -2070,12 +2136,16 @@ do_time_wait:
 
 	tcp_v4_fill_cb(skb, iph, th);
 
+    /* 校验和错误 */
 	if (tcp_checksum_complete(skb)) {
 		inet_twsk_put(inet_twsk(sk));
 		goto csum_error;
 	}
+    /* TIME_WAIT入包处理 */
 	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
+    /* 收到syn */
 	case TCP_TW_SYN: {
+        /* 查找监听控制块 */
 		struct sock *sk2 = inet_lookup_listener(dev_net(skb->dev),
 							&tcp_hashinfo, skb,
 							__tcp_hdrlen(th),
@@ -2083,9 +2153,13 @@ do_time_wait:
 							iph->daddr, th->dest,
 							inet_iif(skb),
 							sdif);
+        /* 找到 */
 		if (sk2) {
+            /* 删除tw控制块 */
 			inet_twsk_deschedule_put(inet_twsk(sk));
+            /* 记录监听控制块 */
 			sk = sk2;
+            /* 进行新请求的处理 */
 			tcp_v4_restore_cb(skb);
 			refcounted = false;
 			goto process;
@@ -2093,13 +2167,17 @@ do_time_wait:
 	}
 		/* to ACK */
 		fallthrough;
+    /* 发送ack */
 	case TCP_TW_ACK:
 		tcp_v4_timewait_ack(sk, skb);
 		break;
+    /* 发送rst */
 	case TCP_TW_RST:
 		tcp_v4_send_reset(sk, skb);
+        /* 删除tw控制块 */
 		inet_twsk_deschedule_put(inet_twsk(sk));
 		goto discard_it;
+    /* 成功*/
 	case TCP_TW_SUCCESS:;
 	}
 	goto discard_it;
@@ -2155,10 +2233,13 @@ static const struct tcp_sock_af_ops tcp_sock_ipv4_specific = {
  */
 static int tcp_v4_init_sock(struct sock *sk)
 {
+    // 强制转换类型
 	struct inet_connection_sock *icsk = inet_csk(sk);
 
+    // 调用这个进行初始化 ，里面就时关于tcp 的一些初始化了，到此为止
 	tcp_init_sock(sk);
 
+    // ipv4 专用操作
 	icsk->icsk_af_ops = &ipv4_specific;
 
 #ifdef CONFIG_TCP_MD5SIG
@@ -2787,7 +2868,7 @@ static int __net_init tcp_sk_init(struct net *net)
 	net->ipv4.sysctl_tcp_challenge_ack_limit = 1000;
 	net->ipv4.sysctl_tcp_min_tso_segs = 2;
 	net->ipv4.sysctl_tcp_min_rtt_wlen = 300;
-	net->ipv4.sysctl_tcp_autocorking = 1;
+	net->ipv4.sysctl_tcp_autocorking = 1; // 打开自动阻塞功能
 	net->ipv4.sysctl_tcp_invalid_ratelimit = HZ/2;
 	net->ipv4.sysctl_tcp_pacing_ss_ratio = 200; // 应用在慢启动阶段
 	net->ipv4.sysctl_tcp_pacing_ca_ratio = 120; // 应用在拥塞避免阶段

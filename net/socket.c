@@ -263,7 +263,7 @@ static struct inode *sock_alloc_inode(struct super_block *sb)
 	ei->socket.sk = NULL;
 	ei->socket.file = NULL;
 
-	return &ei->vfs_inode;
+	return &ei->vfs_inode;  //返回 struct inode vfs_inode;
 }
 
 static void sock_free_inode(struct inode *inode)
@@ -423,15 +423,18 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 }
 EXPORT_SYMBOL(sock_alloc_file);
 
+// 这里所展现的意思是，把socket当成一个文件节点进行操作，open, read,write ,ioctl 等
 static int sock_map_fd(struct socket *sock, int flags)
 {
 	struct file *newfile;
+    /*分配文件描述符*/
 	int fd = get_unused_fd_flags(flags);
 	if (unlikely(fd < 0)) {
 		sock_release(sock);
 		return fd;
 	}
 
+    /*分配file对象*/
 	newfile = sock_alloc_file(sock, flags, NULL);
 	if (!IS_ERR(newfile)) {
 		fd_install(fd, newfile);
@@ -498,7 +501,7 @@ static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed)
 
 	*err = -EBADF;
 	if (f.file) {
-		sock = sock_from_file(f.file, err);
+		sock = sock_from_file(f.file, err); // 根据file结构体获取socket结构体
 		if (likely(sock)) {
 			*fput_needed = f.flags;
 			return sock;
@@ -570,17 +573,26 @@ struct socket *sock_alloc(void)
 	struct inode *inode;
 	struct socket *sock;
 
+    /*
+     * 下面的new_inode_pseudo函数是分配一个新的inode结构体，
+     * 但在实际分配过程中，分配了一个socket_alloc结构体，返回的是inode地址
+     * struct socket_alloc {
+　　         struct socket socket;
+　　         struct inode vfs_inode;
+　　    };
+     */
 	inode = new_inode_pseudo(sock_mnt->mnt_sb);
 	if (!inode)
 		return NULL;
 
+    // 该宏根据返回的inode获取到分配的socket_alloc指针
 	sock = SOCKET_I(inode);
 
 	inode->i_ino = get_next_ino();
-	inode->i_mode = S_IFSOCK | S_IRWXUGO;
-	inode->i_uid = current_fsuid();
-	inode->i_gid = current_fsgid();
-	inode->i_op = &sockfs_inode_ops;
+	inode->i_mode = S_IFSOCK | S_IRWXUGO; // 模式
+	inode->i_uid = current_fsuid();       // 获取当前的uid
+	inode->i_gid = current_fsgid();       // 获取当前的gid
+	inode->i_op = &sockfs_inode_ops;      // 操作
 
 	return sock;
 }
@@ -1364,8 +1376,10 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	/*
 	 *      Check protocol is in range
 	 */
+    // 检查协议族是否在范围呢
 	if (family < 0 || family >= NPROTO)
 		return -EAFNOSUPPORT;
+    // 检查类型
 	if (type < 0 || type >= SOCK_MAX)
 		return -EINVAL;
 
@@ -1374,12 +1388,14 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	   This uglymoron is moved from INET layer to here to avoid
 	   deadlock in module load.
 	 */
+    // 检查用的是 PF_INET 其实这个都是兼容的
 	if (family == PF_INET && type == SOCK_PACKET) {
 		pr_info_once("%s uses obsolete (PF_INET,SOCK_PACKET)\n",
 			     current->comm);
 		family = PF_PACKET;
 	}
 
+    // 安全机制检查
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
 		return err;
@@ -1389,6 +1405,9 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	 *	the protocol is 0, the family is instructed to select an appropriate
 	 *	default.
 	 */
+    // 申请一个 socket 结构体，名字为 sock
+    // 申请一个新的节点和一个新的 socket 项目，绑定他们两个并且初始化
+    // 如果申请 inode 失败返回 NULL，或者返回 sock
 	sock = sock_alloc();
 	if (!sock) {
 		net_warn_ratelimited("socket: no more sockets\n");
@@ -1399,6 +1418,13 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	sock->type = type;
 
 #ifdef CONFIG_MODULES
+	/*
+	 * 如果在 make menuconfig 中选上 编译成模块的选项，则会运行上面这个部分。
+	 * 里面先是检查对应的协议族的操作表是否已经安装，如果没有安装则使用 request_module 进行安装，
+	 * 现在都是在 TCP/IP协议下进行分析，所以 family 是 AF_INET , 也就是 2 ，
+	 * 所以实际检查的全局变量是 net_families[2],
+	 * 这个全局变量是在系统初始化时由 net/ipv4/af_inet.c 文件 inet_init 进行安装
+	 */
 	/* Attempt to load a protocol module if the find failed.
 	 *
 	 * 12/09/1996 Marcin: But! this makes REALLY only sense, if the user
@@ -1425,6 +1451,14 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	/* Now protected by module ref count */
 	rcu_read_unlock();
 
+	/*
+	 * static const structnet_proto_family inet_family_ops = {
+　　         .family = PF_INET,
+　　         .create = inet_create,
+　　         .owner  =THIS_MODULE,
+　　    };
+	 */
+	// create 函数对应的是 net/ipv4/af_inet.c 里面的 inet_create 函数
 	err = pf->create(net, sock, protocol, kern);
 	if (err < 0)
 		goto out_module_put;
@@ -1518,10 +1552,12 @@ int __sys_socket(int family, int type, int protocol)
 	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
 		flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
 
+	// 创建 socket 结构体
 	retval = sock_create(family, type, protocol, &sock);
 	if (retval < 0)
 		return retval;
 
+    // socket 映射到文件系统
 	return sock_map_fd(sock, flags & (O_CLOEXEC | O_NONBLOCK));
 }
 
@@ -1640,20 +1676,28 @@ SYSCALL_DEFINE4(socketpair, int, family, int, type, int, protocol,
  *	the protocol layer (having also checked the address is ok).
  */
 
+/*
+ * 1.根据用户空间传入的fd获取相应的套接字sock
+ * 2.拷贝用户空间的地址信息(ip_addr,port)
+ * 3.调用 AF_INET 协议族的绑定接口inet_bind
+ */
 int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
 {
 	struct socket *sock;
 	struct sockaddr_storage address;
 	int err, fput_needed;
 
+    // 1、根据 sock_fd 获取sock
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (sock) {
+        // 2、拷贝用户用户空间的地址
 		err = move_addr_to_kernel(umyaddr, addrlen, &address);
 		if (!err) {
 			err = security_socket_bind(sock,
 						   (struct sockaddr *)&address,
 						   addrlen);
 			if (!err)
+			    // 3、调用inet协议族的绑定接口inet_bind
 				err = sock->ops->bind(sock,
 						      (struct sockaddr *)
 						      &address, addrlen);
@@ -1960,6 +2004,13 @@ SYSCALL_DEFINE3(getpeername, int, fd, struct sockaddr __user *, usockaddr,
  *	Send a datagram to a given address. We move the address into kernel
  *	space and check the user space data area is readable before invoking
  *	the protocol.
+ */
+/*
+ * 1.通过fd获取了对应的struct socket
+ * 2.创建了用来描述要发送的数据的结构体struct msghdr。
+ * 3.调用了sock_sendmsg来执行实际的发送。
+ * 继续追踪这个函数，会看到最终调用的是sock->ops->sendmsg(sock, msg, msg_data_left(msg));，
+ * 即socet在初始化时赋值给结构体struct proto tcp_prot的函数tcp_sendmsg
  */
 int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 		 struct sockaddr __user *addr,  int addr_len)

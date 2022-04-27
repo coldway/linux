@@ -179,6 +179,19 @@ out:
  *	Buffers may only be allocated from interrupts using a @gfp_mask of
  *	%GFP_ATOMIC.
  */
+/* 分配一个数据长度为size的network buffer {skb+data_buffer}
+ * 1.SKB 的分配时机主要有两种,最常见的一种是在网卡的中断中,有数据包到达的时,系统分配 SKB 包进行包处理;
+ * 第二种情况是主动分配 SKB 包用于各种调试或者其他处理环境.
+ * 2.SKB 的 reserve 操作:SKB 在分配的过程中使用了一个小技巧 :
+ * 即在数据区中预留了 128 个字节大小的空间作为协议头使用,
+ * 通过移动 SKB 的 data 与 tail 指针的位置来实现这个功能.
+ * 3.当数据到达网卡后,会触发网卡的中断,从而进入 ISR 中,系统会在 ISR 中计算出此次接收到的数据的字节数 : pkt_len,
+ * 然后调用 SKB 分配函数来分配 SKB :
+ * skb = dev_alloc_skb(pkt_len+);
+ * 实际上传入的数据区的长度还要比实际接收到的字节数多,这实际上是一种保护机制.
+ * 实际上,在 dev_alloc_skb 函数调用 __dev_alloc_skb 函数,而 __dev_alloc_skb 函数又调用 alloc_skb 函数 时,
+ * 其数据区的大小又增加了 128 字节, 这 128 字节就事前面我们所说的 reserve 机制预留的 header 空间
+ */
 struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 			    int flags, int node)
 {
@@ -188,6 +201,7 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	u8 *data;
 	bool pfmemalloc;
 
+    // 获取指定的高速缓存 fclone_skb or skb
 	cache = (flags & SKB_ALLOC_FCLONE)
 		? skbuff_fclone_cache : skbuff_head_cache;
 
@@ -195,18 +209,21 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 		gfp_mask |= __GFP_MEMALLOC;
 
 	/* Get the HEAD */
+    /* 从cache上分配， 如果cache上无法分配，则从内存中申请 */
 	skb = kmem_cache_alloc_node(cache, gfp_mask & ~__GFP_DMA, node);
 	if (!skb)
 		goto out;
-	prefetchw(skb);
+	prefetchw(skb); // 用于写预取 手工执行预抓取 ----提升性能
 
 	/* We do our best to align skb_shared_info on a separate cache
 	 * line. It usually works because kmalloc(X > SMP_CACHE_BYTES) gives
 	 * aligned memory blocks, unless SLUB/SLAB debug is enabled.
 	 * Both skb->head and skb_shared_info are cache line aligned.
 	 */
-	size = SKB_DATA_ALIGN(size);
+	size = SKB_DATA_ALIGN(size); /* 数据对齐 */
+    /* 对齐后的数据加上skb_shared_info对齐后的大小 */
 	size += SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
+    //分配数据区  使用kmalloc ？？？？？？
 	data = kmalloc_reserve(size, gfp_mask, node, &pfmemalloc);
 	if (!data)
 		goto nodata;
@@ -214,8 +231,9 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	 * Put skb_shared_info exactly at the end of allocated zone,
 	 * to allow max possible filling before reallocation.
 	 */
+    /* 除了skb_shared_info以外的数据大小 */
 	size = SKB_WITH_OVERHEAD(ksize(data));
-	prefetchw(data + size);
+	prefetchw(data + size); // 手工执行预抓取
 
 	/*
 	 * Only clear those fields we need to clear, not those that we will
@@ -224,24 +242,36 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	 */
 	memset(skb, 0, offsetof(struct sk_buff, tail));
 	/* Account for allocated memory : skb + skb->head */
+    /* 总长度= skb大小+  数据大小+  skb_shared_info大小 */
 	skb->truesize = SKB_TRUESIZE(size);
 	skb->pfmemalloc = pfmemalloc;
-	refcount_set(&skb->users, 1);
-	skb->head = data;
+	refcount_set(&skb->users, 1); /* 设置引用计数为1   */
+	skb->head = data; /* head data tail均指向数据区头部 */
 	skb->data = data;
 	skb_reset_tail_pointer(skb);
+    // end tail+size  指向尾部
 	skb->end = skb->tail + size;
+    // l2 l3 l4 head 初始化  为啥不是0
 	skb->mac_header = (typeof(skb->mac_header))~0U;
 	skb->transport_header = (typeof(skb->transport_header))~0U;
 
 	/* make sure we initialize shinfo sequentially */
-	shinfo = skb_shinfo(skb);
+    //之前 手工执行预抓取 现在使用 -------从end开始的区域为skb_shared_info
+	shinfo = skb_shinfo(skb); // skb->end 也就是 linear data的end ----> 数据的开始
 	memset(shinfo, 0, offsetof(struct skb_shared_info, dataref));
 	atomic_set(&shinfo->dataref, 1);
 
-	if (flags & SKB_ALLOC_FCLONE) {
+    /* skbuff_fclone_cache和skbuff_head_cache。它们两个的区别是前者是每两个skb为一组。
+     * 当从skbuff_fclone_cache分配skb时，会两个连续的skb一起分配，但是释放的时候可以分别释放。
+     * 也就是说当调用者知道需要两个skb时，如后面的操作很可能使用skb_clone时，
+     * 那么从skbuff_fclone_cache上分配skb会更高效一些。
+     */
+	if (flags & SKB_ALLOC_FCLONE) { // 如果有克隆标记
 		struct sk_buff_fclones *fclones;
 
+        /* 如果是fclone cache的话，那么skb的下一个buf，也被分配了
+         * 之前使用的是flcone_cache 分配
+         */
 		fclones = container_of(skb, struct sk_buff_fclones, skb1);
 
 		skb->fclone = SKB_FCLONE_ORIG;
@@ -440,6 +470,7 @@ struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int len,
 		goto skb_success;
 	}
 
+    /* 分配长度 + skb_shared_info长度 然后对整个长度进行对齐 */
 	len += SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 	len = SKB_DATA_ALIGN(len);
 
@@ -461,7 +492,7 @@ struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int len,
 	if (unlikely(!data))
 		return NULL;
 
-	skb = __build_skb(data, len);
+	skb = __build_skb(data, len); /* 构建skb */
 	if (unlikely(!skb)) {
 		skb_free_frag(data);
 		return NULL;
@@ -472,8 +503,8 @@ struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int len,
 	skb->head_frag = 1;
 
 skb_success:
-	skb_reserve(skb, NET_SKB_PAD);
-	skb->dev = dev;
+	skb_reserve(skb, NET_SKB_PAD); /* 保留空间 */
+	skb->dev = dev; /* 设置输入设备 */
 
 skb_fail:
 	return skb;
@@ -5125,6 +5156,12 @@ EXPORT_SYMBOL(kfree_skb_partial);
  * @fragstolen: pointer to boolean
  * @delta_truesize: how much more was allocated than was requested
  */
+ /*
+  * skb_try_coalesce函数为详细的合并过程，在进行了必要的合并检查之后进行合并；
+  * 其中当skb线性区域有数据的时候，会将该线性区域处理成frag，并合并到模板skb中；
+  * 对于非线性区域，则直接进行拷贝，如果是clone的，还需要增加frag的引用计数；
+  * 合并完成之后，调整skb数据长度值；
+  */
 bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 		      bool *fragstolen, int *delta_truesize)
 {
@@ -5133,16 +5170,20 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 
 	*fragstolen = false;
 
+    /* 不能为克隆 */
 	if (skb_cloned(to))
 		return false;
 
+    /* to尾部能够容纳得下新数据 */
 	if (len <= skb_tailroom(to)) {
+        /* from拷贝到to尾部 */
 		if (len)
 			BUG_ON(skb_copy_bits(from, 0, skb_put(to, len), len));
 		*delta_truesize = 0;
 		return true;
 	}
 
+    /* to或者from有分片 */
 	to_shinfo = skb_shinfo(to);
 	from_shinfo = skb_shinfo(from);
 	if (to_shinfo->frag_list || from_shinfo->frag_list)
@@ -5150,53 +5191,69 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	if (skb_zcopy(to) || skb_zcopy(from))
 		return false;
 
+    /* 线性缓冲区数据长度不为0 */
 	if (skb_headlen(from) != 0) {
 		struct page *page;
 		unsigned int offset;
 
+        /* 达到最大frags限制 */
 		if (to_shinfo->nr_frags +
 		    from_shinfo->nr_frags >= MAX_SKB_FRAGS)
 			return false;
 
+        /* skb被锁定 */
 		if (skb_head_is_locked(from))
 			return false;
 
+        /* 计算数据增量，去掉头部 */
 		delta = from->truesize - SKB_DATA_ALIGN(sizeof(struct sk_buff));
 
+        /* 找到对应的页和偏移 */
 		page = virt_to_head_page(from->head);
 		offset = from->data - (unsigned char *)page_address(page);
 
+        /* 根据from的页和偏移在to的frags上增加一个frag */
 		skb_fill_page_desc(to, to_shinfo->nr_frags,
 				   page, offset, skb_headlen(from));
 		*fragstolen = true;
 	} else {
+        /* 达到最大frags限制 */
 		if (to_shinfo->nr_frags +
 		    from_shinfo->nr_frags > MAX_SKB_FRAGS)
 			return false;
 
+        /* 计算增量，减掉所有头部和无数据线性区域 */
 		delta = from->truesize - SKB_TRUESIZE(skb_end_offset(from));
 	}
 
 	WARN_ON_ONCE(delta < len);
 
+    /* 拷贝frags */
 	memcpy(to_shinfo->frags + to_shinfo->nr_frags,
 	       from_shinfo->frags,
 	       from_shinfo->nr_frags * sizeof(skb_frag_t));
+    /* 增加frags数量 */
 	to_shinfo->nr_frags += from_shinfo->nr_frags;
 
+    /* 不是克隆的，设置from的frags为0 */
 	if (!skb_cloned(from))
 		from_shinfo->nr_frags = 0;
 
 	/* if the skb is not cloned this does nothing
 	 * since we set nr_frags to 0.
 	 */
+    /* 克隆的，则需要对frags增加引用 */
 	for (i = 0; i < from_shinfo->nr_frags; i++)
 		__skb_frag_ref(&from_shinfo->frags[i]);
 
+    /* 总长度加上增量 */
 	to->truesize += delta;
+    /* 总数据长度增加 */
 	to->len += len;
+    /* 非线性数据长度增加 */
 	to->data_len += len;
 
+    /* 记录增量 */
 	*delta_truesize = delta;
 	return true;
 }

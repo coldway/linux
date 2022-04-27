@@ -326,12 +326,15 @@ struct napi_struct {
 	 * to the per-CPU poll_list, and whoever clears that bit
 	 * can remove from the list right before clearing the bit.
 	 */
+    // 用于将该对象链入轮询队列poll_list中
 	struct list_head	poll_list;
 
-	unsigned long		state;
+	unsigned long		state; // 见下方
+    // 接收配额，一次轮询可以接收的最大数据包数目，见net_rx_action()
 	int			weight;
 	int			defer_hard_irqs_count;
 	unsigned long		gro_bitmask;
+    // 轮询接口，由驱动程序提供
 	int			(*poll)(struct napi_struct *, int);
 #ifdef CONFIG_NETPOLL
 	int			poll_owner;
@@ -347,9 +350,12 @@ struct napi_struct {
 	unsigned int		napi_id;
 };
 
+// state取值
 enum {
+    // 调度标记，设置该标记说明该对象正在轮询队列poll_list中等待被轮询
 	NAPI_STATE_SCHED,	/* Poll is scheduled */
 	NAPI_STATE_MISSED,	/* reschedule a napi */
+    // 禁用标记，设置该标记说明该对象当前不能被调度
 	NAPI_STATE_DISABLE,	/* Disable pending */
 	NAPI_STATE_NPSVC,	/* Netpoll - don't dequeue from poll_list */
 	NAPI_STATE_HASHED,	/* In NAPI hash (busy polling possible) */
@@ -665,12 +671,15 @@ static inline void netdev_queue_numa_node_write(struct netdev_queue *q, int node
 /*
  * This structure holds an RPS map which can be of variable length.  The
  * map is an array of CPUs.
+ * RPS的映射图，即该网络设备可以被分发的CPU映射表。是一个可变长度的数组。
+ * 动态分配，其长度为len，即分配的cpu的个数
  */
 struct rps_map {
-	unsigned int len;
+	unsigned int len; // cpus数组的长度
 	struct rcu_head rcu;
-	u16 cpus[];
+	u16 cpus[]; // cpu数组
 };
+// 根据CPU的个数分配的映射表内存大小
 #define RPS_MAP_SIZE(_num) (sizeof(struct rps_map) + ((_num) * sizeof(u16)))
 
 /*
@@ -740,10 +749,11 @@ bool rps_may_expire_flow(struct net_device *dev, u16 rxq_index, u32 flow_id,
 #endif /* CONFIG_RPS */
 
 /* This structure contains an instance of an RX queue. */
+/* 网卡接收队列 */
 struct netdev_rx_queue {
 #ifdef CONFIG_RPS
-	struct rps_map __rcu		*rps_map;
-	struct rps_dev_flow_table __rcu	*rps_flow_table;
+	struct rps_map __rcu		*rps_map; // RPS cpu映射表
+	struct rps_dev_flow_table __rcu	*rps_flow_table; // RFS流表
 #endif
 	struct kobject			kobj;
 	struct net_device		*dev;
@@ -2439,9 +2449,13 @@ static inline struct sk_buff *call_gro_receive_sk(gro_receive_sk_t cb,
 }
 
 struct packet_type {
+    /* type指定了协议的标识符，处理程序func会使用该标识符，保存了三层协议类型，ETH_P_IP、ETH_P_ARP等等*/
 	__be16			type;	/* This is really htons(ether_type). */
 	bool			ignore_outgoing;
+    /* NULL指针表示该处理程序对系统中所有网络设备都有效 */
 	struct net_device	*dev;	/* NULL is wildcarded here	     */
+    /* func是该结构的主要成员。它是一个指向网络层函数的指针，如果分组的类型适当，将其传递给该函数。
+     * 其中可能的处理程序就是ip_rcv */
 	int			(*func) (struct sk_buff *,
 					 struct net_device *,
 					 struct packet_type *,
@@ -3093,6 +3107,7 @@ extern int netdev_flow_limit_table_len;
  * Incoming packets are placed on per-CPU queues
  */
 struct softnet_data {
+    // 当前 CPU 需要被处理的 napi 链表
 	struct list_head	poll_list;
 	struct sk_buff_head	process_queue;
 
@@ -3130,6 +3145,10 @@ struct softnet_data {
 	unsigned int		input_queue_tail;
 #endif
 	unsigned int		dropped;
+    /* 软中断的接收队列
+       网卡收到的数据放入这个队列
+       软中断 NET_RX_SOFTIRQ 处理这个队列中的数据
+    */
 	struct sk_buff_head	input_pkt_queue;
 	struct napi_struct	backlog;
 
@@ -4609,6 +4628,30 @@ static inline netdev_tx_t __netdev_start_xmit(const struct net_device_ops *ops,
 {
 	__this_cpu_write(softnet_data.xmit.more, more);
 	return ops->ndo_start_xmit(skb, dev);
+	// 根据网络设备驱动来调用的，如e1000的网络驱动：
+	/*
+	 * static const struct net_device_ops e1000e_netdev_ops = {
+	 * .ndo_open		= e1000e_open,
+	 * .ndo_stop		= e1000e_close,
+	 * .ndo_start_xmit		= e1000_xmit_frame,  /* 这里是对应的函数指针挂载的驱动函数
+	 * .ndo_get_stats64	= e1000e_get_stats64,
+	 * .ndo_set_rx_mode	= e1000e_set_rx_mode,
+	 * .ndo_set_mac_address	= e1000_set_mac,
+	 * .ndo_change_mtu		= e1000_change_mtu,
+	 * .ndo_do_ioctl		= e1000_ioctl,
+	 * .ndo_tx_timeout		= e1000_tx_timeout,
+	 * .ndo_validate_addr	= eth_validate_addr,
+	 *
+	 * .ndo_vlan_rx_add_vid	= e1000_vlan_rx_add_vid,
+	 * .ndo_vlan_rx_kill_vid	= e1000_vlan_rx_kill_vid,
+	 * #ifdef CONFIG_NET_POLL_CONTROLLER
+            .ndo_poll_controller	= e1000_netpoll,
+	   #endif
+	 * .ndo_set_features = e1000_set_features,
+	 * .ndo_fix_features = e1000_fix_features,
+	 * .ndo_features_check	= passthru_features_check,
+	 * };
+	 */
 }
 
 static inline bool netdev_xmit_more(void)

@@ -998,6 +998,10 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
  * @member:	the name of the member within the struct.
  *
  */
+//  typeof 将 ptr 的指针临时保存起来为 __mptr
+//  然后用这个 __mptr 指针减去下面的 member 的偏移量。
+//  得到的就是 type 这个结构体的头指针。
+//  offsetof   include/linux/stddef.h
 #define container_of(ptr, type, member) ({				\
 	void *__mptr = (void *)(ptr);					\
 	BUILD_BUG_ON_MSG(!__same_type(*(ptr), ((type *)0)->member) &&	\

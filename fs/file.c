@@ -501,7 +501,7 @@ repeat:
 	error = -EMFILE;
 	if (fd >= end)
 		goto out;
-    //如果fd大于了fdt->max_fds 就需要file struct进行扩展
+    // 如果fd大于了fdt->max_fds 就需要file struct进行扩展
 	error = expand_files(files, fd);
 	if (error < 0)
 		goto out;
@@ -803,13 +803,15 @@ static unsigned long __fget_light(unsigned int fd, fmode_t mask)
 	struct file *file;
 
     // count -- 使用该表的进程数
+    // 如果只有一个进程在使用，那就不需要加锁了，锁比较耗性能
 	if (atomic_read(&files->count) == 1) {
-		file = __fcheck_files(files, fd);
+		file = __fcheck_files(files, fd); // 根据files_struct结构获取file结构体
 		if (!file || unlikely(file->f_mode & mask))
 			return 0;
 		return (unsigned long)file;
 	} else {
         // 跟多个进程共享 files 结构的时候
+        // 多个进程使用，需要加锁保护
 		file = __fget(fd, mask, 1);
 		if (!file)
 			return 0;

@@ -283,10 +283,10 @@ static struct inet_frag_queue *inet_frag_alloc(struct fqdir *fqdir,
 		return NULL;
 
 	q->fqdir = fqdir;
-	f->constructor(q, arg);
-	add_frag_mem_limit(fqdir, f->qsize);
+	f->constructor(q, arg); // 之前初始化时，构造函数来初始化-ip4_frag_init
+	add_frag_mem_limit(fqdir, f->qsize); // sum 网络空间的分段内存
 
-	timer_setup(&q->timer, f->frag_expire, 0);
+	timer_setup(&q->timer, f->frag_expire, 0); // 定时器initand run
 	spin_lock_init(&q->lock);
 	refcount_set(&q->refcnt, 3);
 
@@ -300,7 +300,7 @@ static struct inet_frag_queue *inet_frag_create(struct fqdir *fqdir,
 	struct inet_frags *f = fqdir->f;
 	struct inet_frag_queue *q;
 
-	q = inet_frag_alloc(fqdir, f, arg);
+	q = inet_frag_alloc(fqdir, f, arg); // 分配队列头结构空间
 	if (!q) {
 		*prev = ERR_PTR(-ENOMEM);
 		return NULL;
@@ -330,7 +330,7 @@ struct inet_frag_queue *inet_frag_find(struct fqdir *fqdir, void *key)
 
 	prev = rhashtable_lookup(&fqdir->rhashtable, key, fqdir->f->rhash_params);
 	if (!prev)
-		fq = inet_frag_create(fqdir, key, &prev);
+		fq = inet_frag_create(fqdir, key, &prev); /* 创建节点返回 */
 	if (!IS_ERR_OR_NULL(prev)) {
 		fq = prev;
 		if (!refcount_inc_not_zero(&fq->refcnt))
@@ -436,6 +436,11 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 	delta = -head->truesize;
 
 	/* Head of list must not be cloned. */
+	/*
+	 * 在组装分片时，所有的分片都会组装到第一个分片
+     * 上，因此第一个分片是不能克隆的，如果是克隆的，
+     * 则需为分片组装重新分配一个SKB。
+	 */
 	if (skb_unclone(head, GFP_ATOMIC))
 		return NULL;
 
@@ -447,6 +452,12 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 	 * it to two chunks: the first with data and paged part
 	 * and the second, holding only fragments.
 	 */
+    /*
+     * 分片队列的第一个SKB不能既带有数据，又带有分片，即其frag_list上不能有分片skb，如果有则重新分配一个SKB。
+     * 最终的效果是，head自身不包括数据，其frag_list上链接着所有分片的SKB。
+     * 这也是SKB的一种表现形式，不一定是一个连续的数据块，
+     * 但最终会调用skb_linearize()将这些数据都复制到一个连续的数据块中。
+     */
 	if (skb_has_frag_list(head)) {
 		struct sk_buff *clone;
 		int i, plen = 0;
@@ -482,6 +493,10 @@ void inet_frag_reasm_finish(struct inet_frag_queue *q, struct sk_buff *head,
 	struct sk_buff *fp;
 	int sum_truesize;
 
+    /*
+     * 把所有分片组装起来即将分片链接到第一个SKB的frag_list上，
+     * 同时还需要遍历所有分片，重新计算IP数据包长度以及校验和等。
+     */
 	skb_push(head, head->data - skb_network_header(head));
 
 	/* Traverse the tree in order, to build frag_list. */
@@ -533,6 +548,7 @@ void inet_frag_reasm_finish(struct inet_frag_queue *q, struct sk_buff *head,
 			rbn = rbnext;
 		}
 	}
+    /* 重置首部长度、片偏移、标志位和总长度。*/
 	sub_frag_mem_limit(q->fqdir, sum_truesize);
 
 	*nextp = NULL;

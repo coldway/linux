@@ -2547,7 +2547,7 @@ void __release_sock(struct sock *sk)
 			prefetch(next);
 			WARN_ON_ONCE(skb_dst_is_noref(skb));
 			skb_mark_not_on_list(skb);
-			sk_backlog_rcv(sk, skb);
+			sk_backlog_rcv(sk, skb); // 处理backlog，调用tcp_v4_do_rcv
 
 			cond_resched();
 
@@ -2589,6 +2589,7 @@ int sk_wait_data(struct sock *sk, long *timeo, const struct sk_buff *skb)
 
 	add_wait_queue(sk_sleep(sk), &wait);
 	sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
+    // 注意，它的自动唤醒条件有两个，要么timeo时间到达，要么receive队列不为空
 	rc = sk_wait_event(sk, timeo, skb_peek_tail(&sk->sk_receive_queue) != skb, &wait);
 	sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 	remove_wait_queue(sk_sleep(sk), &wait);
@@ -2604,6 +2605,15 @@ EXPORT_SYMBOL(sk_wait_data);
  *	@kind: allocation type
  *
  *	Similar to __sk_mem_schedule(), but does not update sk_forward_alloc
+ *
+ *	对于发送缓存SK_MEM_SEND而言，如果套接口的类型为SOCK_TREAM（例如TCP），
+ *	并且发送缓存队列的长度值小于TCP套接口设定的最小内存值（/proc/sys/net/ipv4/tcp_wmem），
+ *	说明内存足够，直接返回结束判断。
+ *	如果网络协议的内存（如TCP内存）空间正处于承压状态，
+ *	并且此协议的所有套接口占用的内存页面小于协议设定的最大页面值（/proc/sys/net/ipv4/tcp_mem），
+ *	说明还有可用空间。套接口总占用空间等于协议的套接口总数，
+ *	与当前套接口的发送缓存队列空间、接收缓存空间和套接口预分配空间sk_forward_alloc三者之和的乘积。
+ *	这种算法是不准确的，不能真实的反映该协议类型的所有套接口所占用空
  */
 int __sk_mem_raise_allocated(struct sock *sk, int size, int amt, int kind)
 {
@@ -2972,15 +2982,15 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	sk->sk_allocation	=	GFP_KERNEL;
 	sk->sk_rcvbuf		=	sysctl_rmem_default;
 	sk->sk_sndbuf		=	sysctl_wmem_default;
-	sk->sk_state		=	TCP_CLOSE;
-	sk_set_socket(sk, sock);
+	sk->sk_state		=	TCP_CLOSE; // 初始化sk_state=TCP_CLOSE状态，在后面是的系统调用中会进行判断
+	sk_set_socket(sk, sock); // sk->sk_socket = sock; 设置sk中指向socket的指针
 
-	sock_set_flag(sk, SOCK_ZAPPED);
+	sock_set_flag(sk, SOCK_ZAPPED); // 设置SOKCET的flag位
 
 	if (sock) {
 		sk->sk_type	=	sock->type;
 		RCU_INIT_POINTER(sk->sk_wq, &sock->wq);
-		sock->sk	=	sk;
+		sock->sk	=	sk; // struct socket *sock 的sk指向sock
 		sk->sk_uid	=	SOCK_INODE(sock)->i_uid;
 	} else {
 		RCU_INIT_POINTER(sk->sk_wq, NULL);
@@ -3038,7 +3048,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	 * (Documentation/RCU/rculist_nulls.txt for details)
 	 */
 	smp_wmb();
-	refcount_set(&sk->sk_refcnt, 1);
+	refcount_set(&sk->sk_refcnt, 1); // sk的引用计数加1
 	atomic_set(&sk->sk_drops, 0);
 }
 EXPORT_SYMBOL(sock_init_data);
@@ -3063,16 +3073,16 @@ void release_sock(struct sock *sk)
 {
 	spin_lock_bh(&sk->sk_lock.slock);
 	if (sk->sk_backlog.tail)
-		__release_sock(sk);
+		__release_sock(sk); // sk_backlog_rcv处理backlog队列
 
 	/* Warning : release_cb() might need to release sk ownership,
 	 * ie call sock_release_ownership(sk) before us.
 	 */
-	if (sk->sk_prot->release_cb)
-		sk->sk_prot->release_cb(sk);
+	if (sk->sk_prot->release_cb) // tcp_release_cb
+		sk->sk_prot->release_cb(sk); // 如果delack推迟执行，也会处理prequeue队列
 
-	sock_release_ownership(sk);
-	if (waitqueue_active(&sk->sk_lock.wq))
+	sock_release_ownership(sk);  // !sock_owned_by_user(sk)
+	if (waitqueue_active(&sk->sk_lock.wq)) // 如果其他进程在等待这个ownership
 		wake_up(&sk->sk_lock.wq);
 	spin_unlock_bh(&sk->sk_lock.slock);
 }

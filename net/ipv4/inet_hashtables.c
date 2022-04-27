@@ -58,6 +58,7 @@ static u32 sk_ehashfn(const struct sock *sk)
  * Allocate and initialize a new local port bind bucket.
  * The bindhash mutex for snum's hash chain must be held here.
  */
+/* 添加 hash bucket */
 struct inet_bind_bucket *inet_bind_bucket_create(struct kmem_cache *cachep,
 						 struct net *net,
 						 struct inet_bind_hashbucket *head,
@@ -89,11 +90,15 @@ void inet_bind_bucket_destroy(struct kmem_cache *cachep, struct inet_bind_bucket
 	}
 }
 
+/* 哈希表与 socket 相互建立联系。 */
 void inet_bind_hash(struct sock *sk, struct inet_bind_bucket *tb,
 		    const unsigned short snum)
 {
+    /* 保存绑定的端口 */
 	inet_sk(sk)->inet_num = snum;
+    // 将TCB加入到端口信息接口的owner链表中
 	sk_add_bind_node(sk, &tb->owners);
+    /* 把此tb作为icsk成员icsk_bind_hash */
 	inet_csk(sk)->icsk_bind_hash = tb;
 }
 
@@ -407,6 +412,7 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 	const __portpair ports = INET_COMBINED_PORTS(inet->inet_dport, lport);
 	unsigned int hash = inet_ehashfn(net, daddr, lport,
 					 saddr, inet->inet_dport);
+    // 找到hash桶
 	struct inet_ehash_bucket *head = inet_ehash_bucket(hinfo, hash);
 	spinlock_t *lock = inet_ehash_lockp(hinfo, hash);
 	struct sock *sk2;
@@ -415,6 +421,7 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 
 	spin_lock(lock);
 
+    // 遍历看看有没有四元组一样的，一样的话就报错
 	sk_nulls_for_each(sk2, node, &head->chain) {
 		if (sk2->sk_hash != hash)
 			continue;
@@ -651,6 +658,7 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
 
 	l3mdev = inet_sk_bound_l3mdev(sk);
 
+    // 获取本地端口配置
 	inet_get_local_port_range(net, &low, &high);
 	high++; /* [32768, 60999] -> [32768, 61000[ */
 	remaining = high - low;
@@ -737,8 +745,9 @@ int inet_hash_connect(struct inet_timewait_death_row *death_row,
 	u32 port_offset = 0;
 
 	if (!inet_sk(sk)->inet_num)
-		port_offset = inet_sk_port_offset(sk);
+		port_offset = inet_sk_port_offset(sk); // 根据要连接的目的 IP 和端口等信息生成一个随机数。
 	return __inet_hash_connect(death_row, sk, port_offset,
+	        // __inet_check_established：检查是否和现有 ESTABLISH 的连接是否冲突的时候用的函数
 				   __inet_check_established);
 }
 EXPORT_SYMBOL_GPL(inet_hash_connect);

@@ -64,8 +64,9 @@ struct ipq {
 	u8		ecn; /* RFC3168 support */
 	u16		max_df_size; /* largest frag with DF set seen */
 	int             iif;
-	unsigned int    rid;
-	struct inet_peer *peer;
+	unsigned int    rid;    // 已收到的分片计数器
+	struct inet_peer *peer; // 记录发送方信息
+    // 通过rid peer 可以防止Dos攻击
 };
 
 static u8 ip4_frag_ecn(u8 tos)
@@ -81,13 +82,14 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 
 static void ip4_frag_init(struct inet_frag_queue *q, const void *a)
 {
-	struct ipq *qp = container_of(q, struct ipq, q);
+	struct ipq *qp = container_of(q, struct ipq, q); // 获取分段队列指针
 	struct net *net = q->fqdir->net;
 
 	const struct frag_v4_compare_key *key = a;
 
 	q->key.v4 = *key;
 	qp->ecn = 0;
+    // 记录对方信息
 	qp->peer = q->fqdir->max_dist ?
 		inet_getpeer_v4(net->ipv4.peers, key->saddr, key->vif, 1) :
 		NULL;
@@ -149,10 +151,12 @@ static void ip_expire(struct timer_list *t)
 
 	spin_lock(&qp->q.lock);
 
+    // ipq 已经是complete状态不处理 直接释放ipq以及其所有的分片
 	if (qp->q.flags & INET_FRAG_COMPLETE)
 		goto out;
 
-	ipq_kill(qp);
+	ipq_kill(qp); // 将其从散列表移除
+    // 数据统计
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMFAILS);
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMTIMEOUT);
 
@@ -213,6 +217,7 @@ static struct ipq *ip_find(struct net *net, struct iphdr *iph,
 	};
 	struct inet_frag_queue *q;
 
+    /* 根据hash值查找或创建队列 */
 	q = inet_frag_find(net->ipv4.fqdir, &key);
 	if (!q)
 		return NULL;
@@ -279,13 +284,20 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	int err = -ENOENT;
 	u8 ecn;
 
+    // 分段队列接收完成 则释放此分片返回
 	if (qp->q.flags & INET_FRAG_COMPLETE)
 		goto err;
 
+    /* 数据包没有分段标志or分段队列间隔过大
+     * //重现调整分段队列是否出错
+     * 如果不是本地生成的分片，则调用ip_frag_too_far检测
+     * 是否存在dos攻击，存在攻击则调用ip_frag_reinit释放所用分片
+     */
 	if (!(IPCB(skb)->flags & IPSKB_FRAG_COMPLETE) &&
 	    unlikely(ip_frag_too_far(qp)) &&
 	    unlikely(err = ip_frag_reinit(qp))) {
-		ipq_kill(qp);
+		ipq_kill(qp); // 将ipq从散列表中移除停止定时器 计数器减一
+        // 调用ipq_unlink 设置ipq为complete状态，只有complete状态才能释放
 		goto err;
 	}
 
@@ -297,39 +309,47 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	ihl = ip_hdrlen(skb);
 
 	/* Determine the position of this fragment. */
+    /* 获取ip首部中的数据标志位 片的偏移 首部长度 */
 	end = offset + skb->len - skb_network_offset(skb) - ihl;
 	err = -EINVAL;
 
-	/* Is this the final fragment? */
+	/* Is this the final fragment?
+	 * 如果是最后一个片则先对分片进行检测
+     */
 	if ((flags & IP_MF) == 0) {
 		/* If we already have some bits beyond end
 		 * or have different end, the segment is corrupted.
+		 * 结束位置小于前一个位置，ipq已经有last_in 标志且分片末尾不等于原始数据长度
 		 */
 		if (end < qp->q.len ||
 		    ((qp->q.flags & INET_FRAG_LAST_IN) && end != qp->q.len))
 			goto discard_qp;
-		qp->q.flags |= INET_FRAG_LAST_IN;
+		qp->q.flags |= INET_FRAG_LAST_IN; /*通过校验并设置为last_in标志，存储完整的数据长度*/
 		qp->q.len = end;
 	} else {
-		if (end&7) {
+		if (end&7) { // 按8字节对其
 			end &= ~7;
 			if (skb->ip_summed != CHECKSUM_UNNECESSARY)
 				skb->ip_summed = CHECKSUM_NONE;
 		}
 		if (end > qp->q.len) {
-			/* Some bits beyond end -> corruption. */
+            /* 结束地址大于前一个分段数据地址
+            /* Some bits beyond end -> corruption.
+             * 如果设置了最后一个分段数据标志表示最后一个包，则错误
+             */
 			if (qp->q.flags & INET_FRAG_LAST_IN)
 				goto discard_qp;
 			qp->q.len = end;
 		}
 	}
-	if (end == offset)
+	if (end == offset) // 等于起始位置 即分片区数据长度为0
 		goto discard_qp;
 
-	err = -ENOMEM;
+	err = -ENOMEM; // 去掉ip首部
 	if (!pskb_pull(skb, skb_network_offset(skb) + ihl))
 		goto discard_qp;
 
+    // skb 数据长度为end-offset ip 有效载荷长度
 	err = pskb_trim_rcsum(skb, end - offset);
 	if (err)
 		goto discard_qp;
@@ -347,11 +367,12 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	if (dev)
 		qp->iif = dev->ifindex;
 
-	qp->q.stamp = skb->tstamp;
-	qp->q.meat += skb->len;
+	qp->q.stamp = skb->tstamp; // 更新时间搓
+	qp->q.meat += skb->len;    // sum ipq已收到分片的总长度
 	qp->ecn |= ecn;
+    // 分片组装模块的所占内存的总长度
 	add_frag_mem_limit(qp->q.fqdir, skb->truesize);
-	if (offset == 0)
+	if (offset == 0)           // 为第一个片 设置标志
 		qp->q.flags |= INET_FRAG_FIRST_IN;
 
 	fragsize = skb->len + ihl;
@@ -364,7 +385,7 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 		qp->max_df_size = fragsize;
 
 	if (qp->q.flags == (INET_FRAG_FIRST_IN | INET_FRAG_LAST_IN) &&
-	    qp->q.meat == qp->q.len) {
+	    qp->q.meat == qp->q.len) { // 所有报文都到齐则重组
 		unsigned long orefdst = skb->_skb_refdst;
 
 		skb->_skb_refdst = 0UL;
@@ -399,6 +420,9 @@ static bool ip_frag_coalesce_ok(const struct ipq *qp)
 }
 
 /* Build a new IP datagram from all its fragments. */
+/*
+ * 用于组装已到齐的所有分片，当原始数据包的所有分片都已到齐时，会调用此函数组装分片。
+ */
 static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 			 struct sk_buff *prev_tail, struct net_device *dev)
 {
@@ -408,6 +432,9 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 	int len, err;
 	u8 ecn;
 
+    /*
+     * 要开始组装了，因此调用ipq_kill()将此ipq结点从ipq散列表删除，并删除定时器。
+     */
 	ipq_kill(qp);
 
 	ecn = ip_frag_ecn_table[qp->ecn];
@@ -421,6 +448,7 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 	if (!reasm_data)
 		goto out_nomem;
 
+    /* 计算原始报文的长度 超过64KB */
 	len = ip_hdrlen(skb) + qp->q.len;
 	err = -E2BIG;
 	if (len > 65535)
@@ -477,23 +505,26 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 	int vif = l3mdev_master_ifindex_rcu(dev);
 	struct ipq *qp;
 
+    // 递增计数
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMREQDS);
 	skb_orphan(skb);
 
 	/* Lookup (or create) queue header */
+    /* 查找或创建IP分片队列 */
 	qp = ip_find(net, ip_hdr(skb), user, vif);
-	if (qp) {
+	if (qp) { /* 分片队列存在 */
 		int ret;
 
 		spin_lock(&qp->q.lock);
 
-		ret = ip_frag_queue(qp, skb);
+		ret = ip_frag_queue(qp, skb); // 分片数据包入队重组数据包
 
 		spin_unlock(&qp->q.lock);
 		ipq_put(qp);
 		return ret;
 	}
 
+    /* 创建新的ip分片队列失败，内存不足递增失败计数 */
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMFAILS);
 	kfree_skb(skb);
 	return -ENOMEM;
@@ -738,14 +769,14 @@ static const struct rhashtable_params ip4_rhash_params = {
 
 void __init ipfrag_init(void)
 {
-	ip4_frags.constructor = ip4_frag_init;
-	ip4_frags.destructor = ip4_frag_free;
-	ip4_frags.qsize = sizeof(struct ipq);
-	ip4_frags.frag_expire = ip_expire;
+	ip4_frags.constructor = ip4_frag_init; // 设置初始化ip 分段队列的构造函数
+	ip4_frags.destructor = ip4_frag_free;  // 析构函数
+	ip4_frags.qsize = sizeof(struct ipq);  // 队列机构长度
+	ip4_frags.frag_expire = ip_expire;     // 设置分段队列过期处理函数
 	ip4_frags.frags_cache_name = ip_frag_cache_name;
 	ip4_frags.rhash_params = ip4_rhash_params;
 	if (inet_frags_init(&ip4_frags))
 		panic("IP: failed to allocate ip4_frags cache\n");
 	ip4_frags_ctl_register();
-	register_pernet_subsys(&ip4_frags_ops);
+	register_pernet_subsys(&ip4_frags_ops); // 向内核注册ipv4分段管理函数
 }

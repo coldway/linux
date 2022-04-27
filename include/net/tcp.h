@@ -673,18 +673,32 @@ static inline u32 __tcp_set_rto(const struct tcp_sock *tp)
 	return usecs_to_jiffies((tp->srtt_us >> 3) + tp->rttvar_us);
 }
 
+// 直接调用__tcp_fast_path_on的时机是connect系统调用即将结束时
 static inline void __tcp_fast_path_on(struct tcp_sock *tp, u32 snd_wnd)
 {
+    // 构建TCP首部的第4个字节，即首部长度、标记位、窗口。
+    // 其中tp->tcp_header_len是首部长度的字节数，
+    // TCP首部中记录首部长度的数值位于第4个字节的高4bit，即第28-31bit，
+    // 而且这个数值乘以4才是首部长度的字节数。故tp->tcp_header_len需要左移28位，再右移2位（除以4），
+    // 即左移26位。
 	tp->pred_flags = htonl((tp->tcp_header_len << 26) |
 			       ntohl(TCP_FLAG_ACK) |
 			       snd_wnd);
 }
 
+// 调用tcp_fast_path_on的时机是收到三次握手中的ACK报文时
 static inline void tcp_fast_path_on(struct tcp_sock *tp)
 {
 	__tcp_fast_path_on(tp, tp->snd_wnd >> tp->rx_opt.snd_wscale);
 }
 
+/*
+ * 能够进入“快速路径”处理的基本条件
+ * 1 没有乱序数据包
+ * 2 接收窗口不为0
+ * 3 当前的已经提交的数据包大小是否小于接收缓冲区的大小，能够放的下
+ * 4 没有紧急数据
+ */
 static inline void tcp_fast_path_check(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -824,7 +838,8 @@ static inline u64 tcp_skb_timestamp_us(const struct sk_buff *skb)
  * If this grows please adjust skbuff.h:skbuff->cb[xxx] size appropriately.
  */
 struct tcp_skb_cb {
-	__u32		seq;		/* Starting sequence number	*/
+	__u32		seq;		/* Starting sequence number	*/ // 当前tcp包的第一个序列号
+	// 表示结束的序列号：seq + FIN + SYN + 数据长度len
 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
 	union {
 		/* Note : tcp_tw_isn is used in input path only
@@ -839,8 +854,29 @@ struct tcp_skb_cb {
 			u16	tcp_gso_size;
 		};
 	};
+    // tcp头的flag
+    /*
+     * #define TCPCB_FLAG_FIN		0x01  // FIN 结束符
+     * #define TCPCB_FLAG_SYN		0x02  // SYN 握手
+     * #define TCPCB_FLAG_RST		0x04  // RST 重置
+     * #define TCPCB_FLAG_PSH		0x08  // PSH 接收方要立即处理
+     * #define TCPCB_FLAG_ACK		0x10  // ACK ack段有效
+     * #define TCPCB_FLAG_URG		0x20  // URG 紧急指针
+     * #define TCPCB_FLAG_ECE		0x40  // ECE 有拥塞情况(可能是传播线路上的拥塞，例如路由器提供的信息)
+     * #define TCPCB_FLAG_CWR		0x80  // CWR (发生某种拥塞，例如ICMP源抑制、本地设备拥塞)
+     */
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 
+    // SACK/FACK的状态flag或者是sack option的偏移
+    /*
+     * #define TCPCB_SACKED_ACKED	0x01 // tcp的cb结构上是被sack确认的
+     * #define TCPCB_SACKED_RETRANS	0x02 // 重传帧
+     * #define TCPCB_LOST		0x04 // 丢失
+     * #define TCPCB_TAGBITS		0x07 // tag bits ？
+     * #define TCPCB_EVER_RETRANS	0x80
+     * #define TCPCB_RETRANS		(TCPCB_SACKED_RETRANS|TCPCB_EVER_RETRANS)
+     */
+    // SACK/FACK的状态flag或者是sack option的偏移
 	__u8		sacked;		/* State flags for SACK.	*/
 #define TCPCB_SACKED_ACKED	0x01	/* SKB ACK'd by a SACK block	*/
 #define TCPCB_SACKED_RETRANS	0x02	/* SKB retransmitted		*/
@@ -856,7 +892,7 @@ struct tcp_skb_cb {
 			eor:1,		/* Is skb MSG_EOR marked? */
 			has_rxtstamp:1,	/* SKB has a RX timestamp	*/
 			unused:5;
-	__u32		ack_seq;	/* Sequence number ACK'd	*/
+	__u32		ack_seq;	/* Sequence number ACK'd	*/ // ack(确认)的序列号
 	union {
 		struct {
 			/* There is space for up to 24 bytes */
@@ -1175,8 +1211,16 @@ static inline bool tcp_is_reno(const struct tcp_sock *tp)
 	return !tcp_is_sack(tp);
 }
 
+// 该函数估算的是那些已经发送出去（初传+重传）并且已经离开
+// 网络的段的数目，这些段主要是SACK确认的+已经判定为丢失的段
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 {
+    // sacked_out：启用SACK时，表示已经被SACK选项确认的段的数量；
+    //			  不启用SACK时，记录了收到的重复ACK的次数，因为重复ACK不会自动发送，
+    //			  一定是对端收到了数据包；
+    // lost_out：记录发送后在传输过程中丢失的段的数目，因为TCP没有一种机制可以准确的知道
+    //		     发出去的段是否真的丢了，所以这只是一种算法上的估计值
+    // 无论如何，这两种段属于已经发送，但是可以确定它们在网络中已经不存在了
 	return tp->sacked_out + tp->lost_out;
 }
 
@@ -1194,8 +1238,12 @@ static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
  *	"Packets left network, but not honestly ACKed yet" PLUS
  *	"Packets fast retransmitted"
  */
+// 计算还在传输中的字节数 即还没有到达对方的数据段的字节数
 static inline unsigned int tcp_packets_in_flight(const struct tcp_sock *tp)
 {
+    // packets_out记录的是已经从发送队列发出，但是尚未被确认的段的数目（不包括重传）
+    // retrans_out表示的是因为重传才发送出去，但是还没有被确认的段的数目
+    // tcp_left_out()：发出去了但是已经离开了网络的数据包数目
 	return tp->packets_out - tcp_left_out(tp) + tp->retrans_out;
 }
 
@@ -1226,9 +1274,9 @@ static inline __u32 tcp_current_ssthresh(const struct sock *sk)
 	const struct tcp_sock *tp = tcp_sk(sk);
 
 	if (tcp_in_cwnd_reduction(sk))
-		return tp->snd_ssthresh;
+		return tp->snd_ssthresh; /* CWR和Recovery时cwnd在减小 */
 	else
-		return max(tp->snd_ssthresh,
+		return max(tp->snd_ssthresh, /* 调大ssthresh */
 			   ((tp->snd_cwnd >> 1) +
 			    (tp->snd_cwnd >> 2)));
 }
@@ -1248,8 +1296,11 @@ static inline __u32 tcp_max_tso_deferred_mss(const struct tcp_sock *tp)
 }
 
 /* Returns end sequence number of the receiver's advertised window */
+// 返回发送窗口的右边界
 static inline u32 tcp_wnd_end(const struct tcp_sock *tp)
 {
+    // snd_una：已经发送但是还没有被确认的最小序号
+    // snd_wnd：当前发送窗口大小，即接收方剩余的接收缓冲区
 	return tp->snd_una + tp->snd_wnd;
 }
 
@@ -1851,7 +1902,7 @@ static inline void tcp_rtx_queue_unlink_and_free(struct sk_buff *skb, struct soc
 
 static inline void tcp_push_pending_frames(struct sock *sk)
 {
-	if (tcp_send_head(sk)) {
+	if (tcp_send_head(sk)) { //发送队列有数据可发送
 		struct tcp_sock *tp = tcp_sk(sk);
 
 		__tcp_push_pending_frames(sk, tcp_current_mss(sk), tp->nonagle);

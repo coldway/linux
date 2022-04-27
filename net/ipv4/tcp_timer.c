@@ -194,10 +194,10 @@ static bool retransmits_timed_out(struct sock *sk,
 {
 	unsigned int start_ts;
 
-	if (!inet_csk(sk)->icsk_retransmits)
+	if (!inet_csk(sk)->icsk_retransmits) // 没有重传
 		return false;
 
-	start_ts = tcp_sk(sk)->retrans_stamp;
+	start_ts = tcp_sk(sk)->retrans_stamp; // 使用重传时间作为起始时间
 	if (likely(timeout == 0)) {
 		unsigned int rto_base = TCP_RTO_MIN;
 
@@ -232,7 +232,7 @@ static int tcp_write_timeout(struct sock *sk)
 	} else {
 		if (retransmits_timed_out(sk, net->ipv4.sysctl_tcp_retries1, 0)) {
 			/* Black hole detection */
-			tcp_mtu_probing(icsk, sk);
+			tcp_mtu_probing(icsk, sk); // 执行路径MTU探测
 
 			dst_negative_advice(sk);
 		} else {
@@ -243,14 +243,14 @@ static int tcp_write_timeout(struct sock *sk)
 		}
 
 		retry_until = net->ipv4.sysctl_tcp_retries2;
-		if (sock_flag(sk, SOCK_DEAD)) {
+		if (sock_flag(sk, SOCK_DEAD)) { // 当前socket是orphan socket
 			const bool alive = icsk->icsk_rto < TCP_RTO_MAX;
 
 			retry_until = tcp_orphan_retries(sk, alive);
 			do_reset = alive ||
 				!retransmits_timed_out(sk, retry_until, 0);
 
-			if (tcp_out_of_resources(sk, do_reset))
+			if (tcp_out_of_resources(sk, do_reset)) // 当前orphan socket数量太多
 				return 1;
 		}
 	}
@@ -264,9 +264,9 @@ static int tcp_write_timeout(struct sock *sk)
 				  icsk->icsk_retransmits,
 				  icsk->icsk_rto, (int)expired);
 
-	if (expired) {
+	if (expired) { // 如果超时
 		/* Has it gone just too far? */
-		tcp_write_err(sk);
+		tcp_write_err(sk); // 关闭连接
 		return 1;
 	}
 
@@ -444,27 +444,29 @@ void tcp_retransmit_timer(struct sock *sk)
 
 	req = rcu_dereference_protected(tp->fastopen_rsk,
 					lockdep_sock_is_held(sk));
-	if (req) {
+	if (req) { // 开启了TFO功能
 		WARN_ON_ONCE(sk->sk_state != TCP_SYN_RECV &&
 			     sk->sk_state != TCP_FIN_WAIT1);
-		tcp_fastopen_synack_timer(sk, req);
+		tcp_fastopen_synack_timer(sk, req); // 重传SYN|ACK
 		/* Before we receive ACK to our SYN-ACK don't retransmit
 		 * anything else (e.g., data or FIN segments).
 		 */
 		return;
 	}
 
-	if (!tp->packets_out)
+	if (!tp->packets_out) // 没有传输的包，即所有的包都被ack
 		return;
 
 	skb = tcp_rtx_queue_head(sk);
 	if (WARN_ON_ONCE(!skb))
 		return;
 
+	// 如果超时定时器RTO到期，TLP的探测报文及其确认ACK报文有可能都已经丢失或丢失了一个，
+	// 清零tlp_high_seq，结束TLP过程
 	tp->tlp_high_seq = 0;
 
-	if (!tp->snd_wnd && !sock_flag(sk, SOCK_DEAD) &&
-	    !((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {
+	if (!tp->snd_wnd && !sock_flag(sk, SOCK_DEAD) && // 发送窗口关闭且socket并非orphan socket
+	    !((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) { // 并非连接建立状态
 		/* Receiver dastardly shrinks window. Our retransmits
 		 * become zero probes, but we should not timeout this
 		 * connection. If the socket is an orphan, time it out,
@@ -488,20 +490,24 @@ void tcp_retransmit_timer(struct sock *sk)
 		}
 #endif
 		if (tcp_jiffies32 - tp->rcv_tstamp > TCP_RTO_MAX) {
-			tcp_write_err(sk);
+            // 超过TCP_RTO_MAX的时间没有收到对端的确认
+			tcp_write_err(sk); // 报告错误并关闭连接
 			goto out;
 		}
-		tcp_enter_loss(sk);
-		tcp_retransmit_skb(sk, skb, 1);
+		tcp_enter_loss(sk); // 进入拥塞控制的LOSS状态
+		tcp_retransmit_skb(sk, skb, 1);  // 重传发送队列中的首包
 		__sk_dst_reset(sk);
 		goto out_reset_timer;
 	}
 
+    // 发送窗口非0的情况
+
 	__NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPTIMEOUTS);
-	if (tcp_write_timeout(sk))
+	if (tcp_write_timeout(sk)) // 重传等待时间过长或orphan socket消耗资源过多
 		goto out;
 
-	if (icsk->icsk_retransmits == 0) {
+	if (icsk->icsk_retransmits == 0) { // 第一次重传
+        // 更新MIB数据库信息，用于网络管理
 		int mib_idx = 0;
 
 		if (icsk->icsk_ca_state == TCP_CA_Recovery) {
@@ -522,13 +528,14 @@ void tcp_retransmit_timer(struct sock *sk)
 			__NET_INC_STATS(sock_net(sk), mib_idx);
 	}
 
-	tcp_enter_loss(sk);
+	tcp_enter_loss(sk); // 进入丢包状态
 
 	icsk->icsk_retransmits++;
-	if (tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1) > 0) {
+	if (tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1) > 0) { // 重传发送队列中的首包失败
 		/* Retransmission failed because of local congestion,
 		 * Let senders fight for local resources conservatively.
 		 */
+		// 重置重传定时器
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 					  TCP_RESOURCE_PROBE_INTERVAL,
 					  TCP_RTO_MAX);
@@ -570,7 +577,7 @@ out_reset_timer:
 		icsk->icsk_rto = min(__tcp_set_rto(tp), TCP_RTO_MAX);
 	} else {
 		/* Use normal (exponential) backoff */
-		icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX);
+		icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX); // 增加超时时间
 	}
 	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 				  tcp_clamp_rto_to_user_timeout(sk), TCP_RTO_MAX);
@@ -589,9 +596,10 @@ void tcp_write_timer_handler(struct sock *sk)
 
 	if (((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)) ||
 	    !icsk->icsk_pending)
+        //TCP状态是CLOSE/LISTEN或未安装定时器
 		goto out;
 
-	if (time_after(icsk->icsk_timeout, jiffies)) {
+	if (time_after(icsk->icsk_timeout, jiffies)) { // 尚未超时
 		sk_reset_timer(sk, &icsk->icsk_retransmit_timer, icsk->icsk_timeout);
 		goto out;
 	}
@@ -603,21 +611,21 @@ void tcp_write_timer_handler(struct sock *sk)
 	case ICSK_TIME_REO_TIMEOUT:
 		tcp_rack_reo_timeout(sk);
 		break;
-	case ICSK_TIME_LOSS_PROBE:
+	case ICSK_TIME_LOSS_PROBE: // 正常重传&探测报文重传
 		tcp_send_loss_probe(sk);
 		break;
-	case ICSK_TIME_RETRANS:
+	case ICSK_TIME_RETRANS: // 正常重传
 		icsk->icsk_pending = 0;
 		tcp_retransmit_timer(sk);
 		break;
-	case ICSK_TIME_PROBE0:
+	case ICSK_TIME_PROBE0: // 0窗口时探测定时器
 		icsk->icsk_pending = 0;
 		tcp_probe_timer(sk);
 		break;
 	}
 
 out:
-	sk_mem_reclaim(sk);
+	sk_mem_reclaim(sk); // 回收缓存
 }
 
 static void tcp_write_timer(struct timer_list *t)

@@ -114,6 +114,7 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 	u32 snd_us, ack_us;
 
 	/* Clear app limited if bubble is acked and gone. */
+	// 在发送报文数量超过应用程序限制点时，清零app_limited
 	if (tp->app_limited && after(tp->delivered, tp->app_limited))
 		tp->app_limited = 0;
 
@@ -131,21 +132,28 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 	 * a SACK reneging event may overestimate bw by including packets that
 	 * were SACKed before the reneg.
 	 */
+	// 没有记录报文确认时的时间戳，或者接收端删除了接收到的乱序报文，返回一个无效的速率样本
+	// 计算带宽时，会包含进了接收端删除的乱序报文，将导致对带宽的高估
 	if (!rs->prior_mstamp || is_sack_reneg) {
 		rs->delivered = -1;
 		rs->interval_us = -1;
 		return;
 	}
-	rs->delivered   = tp->delivered - rs->prior_delivered;
+	rs->delivered   = tp->delivered - rs->prior_delivered; // 保存的本次采样周期内确认的报文数量
 
 	/* Model sending data and receiving ACKs as separate pipeline phases
 	 * for a window. Usually the ACK phase is longer, but with ACK
 	 * compression the send phase can be longer. To be safe we use the
 	 * longer phase.
 	 */
-	snd_us = rs->interval_us;				/* send phase */
+	/*
+	 * 对于一个发送窗口期，ACK接收的时长大于数据发送的时长，正如开始所述，这导致计算的ACK接收速率小于数据发送速率。
+	 * 但是考虑到ACK压缩的情况，安全的选择是将interval_us设置为两个时间段之间的较大值。
+	 */
+	snd_us = rs->interval_us;				   /* send phase */
+	// 因为是在收到ack时才会进行bbr的算法更新，所以此时的tcp_mstamp是在接收最后一个ack收到的时间
 	ack_us = tcp_stamp_us_delta(tp->tcp_mstamp,
-				    rs->prior_mstamp); /* ack phase */
+				    rs->prior_mstamp);         /* ack phase */
 	rs->interval_us = max(snd_us, ack_us);
 
 	/* Record both segment send and ack receive intervals */
@@ -159,6 +167,7 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 	 * measuring the delivery rate during loss recovery is crucial
 	 * for connections suffer heavy or prolonged losses.
 	 */
+	// interval_us小于RTT的最小值，很有可能带宽会估算过高，将其设置为无效值。
 	if (unlikely(rs->interval_us < tcp_min_rtt(tp))) {
 		if (!rs->is_retrans)
 			pr_debug("tcp rate: %ld %d %u %u %u\n",
@@ -170,6 +179,10 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 	}
 
 	/* Record the last non-app-limited or the highest app-limited bw */
+	/*
+	 * app_limited为空，记录的速率为应用程序不限制的速率。
+	 * 或者app_limited有值，如果当前的速率大于记录的速率(rate_delivered/rate_interval_us),进行速率更新。
+	 */
 	if (!rs->is_app_limited ||
 	    ((u64)rs->delivered * tp->rate_interval_us >=
 	     (u64)tp->rate_delivered * rs->interval_us)) {

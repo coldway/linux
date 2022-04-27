@@ -15,18 +15,20 @@
  * IO submission data structure (Submission Queue Entry)
  */
 struct io_uring_sqe {
-	__u8	opcode;		/* type of operation for this sqe */
+	__u8	opcode;		/* type of operation for this sqe */// 请求类型，例如IORING_OP_READV
 	__u8	flags;		/* IOSQE_ flags */
-	__u16	ioprio;		/* ioprio for the request */
-	__s32	fd;		/* file descriptor to do IO on */
+	__u16	ioprio;		/* ioprio for the request */// 优先级，和ioprio_set系统调用的作用类似
+	__s32	fd;		/* file descriptor to do IO on */// 需要操作的文件fd
 	union {
-		__u64	off;	/* offset into file */
+		__u64	off;	/* offset into file */ // 文件偏移位置
 		__u64	addr2;
 	};
 	union {
+        // 读写数据地址，如果是readv/writev请求则是iovec数组地址
 		__u64	addr;	/* pointer to buffer or iovecs */
 		__u64	splice_off_in;
 	};
+    // 读写数据长度，如果是readv/writev请求则是iovec数组长度
 	__u32	len;		/* buffer size or number of iovecs */
 	union {
 		__kernel_rwf_t	rw_flags;
@@ -42,6 +44,7 @@ struct io_uring_sqe {
 		__u32		fadvise_advice;
 		__u32		splice_flags;
 	};
+    // 使用者任意指定的字段，在复制到对应的cqe中，一般用于标识cqe与sqe的对应关系
 	__u64	user_data;	/* data to be passed back at completion time */
 	union {
 		struct {
@@ -155,7 +158,8 @@ enum {
  * IO completion data structure (Completion Queue Entry)
  */
 struct io_uring_cqe {
-	__u64	user_data;	/* sqe->data submission passed back */
+	__u64	user_data;	/* sqe->data submission passed back *///来自对应的sqe中的user_data字段
+    //请求处理结果，和普通IO操作的返回值差不多。一般成功时返回字节数，处理失败时返回-errno。
 	__s32	res;		/* result code for this event */
 	__u32	flags;
 };
@@ -228,16 +232,16 @@ struct io_cqring_offsets {
  * Passed in for io_uring_setup(2). Copied back with updated info on success
  */
 struct io_uring_params {
-	__u32 sq_entries;
-	__u32 cq_entries;
-	__u32 flags;
+	__u32 sq_entries; /* IO请求sqe数量，内核输出 */
+	__u32 cq_entries; /* IO完成事件cqe数量，内核输出 */
+	__u32 flags;      /* io_uring运行模式和配置，调用者输入 */
 	__u32 sq_thread_cpu;
 	__u32 sq_thread_idle;
 	__u32 features;
 	__u32 wq_fd;
-	__u32 resv[3];
-	struct io_sqring_offsets sq_off;
-	struct io_cqring_offsets cq_off;
+	__u32 resv[3];    /* 预留空间，用于对其cacheline，同时为将来扩展留下空间 */
+	struct io_sqring_offsets sq_off; /* sqe队列的偏移地址 */
+	struct io_cqring_offsets cq_off; /* cqe队列的偏移地址 */
 };
 
 /*

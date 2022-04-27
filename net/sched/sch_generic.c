@@ -376,6 +376,11 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 	return sch_direct_xmit(skb, q, dev, txq, root_lock, validate);
 }
 
+/*
+ * 函数__qdisc_run需要做的就是不断从优先级队列中取出包, 然后通过sch_direct_xmit直接发送到驱动
+ * 如果发送的数据达到了设备设定的配额(Linux默认网卡数据发送配额为64),
+ * 或者其他CPU被其他优先级高的任务抢占后, 则调用__netif_schedule执行软中断任务.
+ */
 void __qdisc_run(struct Qdisc *q)
 {
 	int quota = dev_tx_weight;

@@ -124,19 +124,27 @@ void inet_get_local_port_range(struct net *net, int *low, int *high)
 	do {
 		seq = read_seqbegin(&net->ipv4.ip_local_ports.lock);
 
+        // 动态可分配的端口区间是由下面的系统参数确认的，代码默认范围为[32768, 61000]
 		*low = net->ipv4.ip_local_ports.range[0];
 		*high = net->ipv4.ip_local_ports.range[1];
 	} while (read_seqretry(&net->ipv4.ip_local_ports.lock, seq));
 }
 EXPORT_SYMBOL(inet_get_local_port_range);
 
+/*
+ * relax为false表示不进行严格的比对
+ * reuseport_ok为false表示比对时不考虑端口重用的情况
+ */
 static int inet_csk_bind_conflict(const struct sock *sk,
 				  const struct inet_bind_bucket *tb,
 				  bool relax, bool reuseport_ok)
 {
 	struct sock *sk2;
+    /* 地址重用 */
 	bool reuse = sk->sk_reuse;
+    /* 端口重用 */
 	bool reuseport = !!sk->sk_reuseport;
+    /* 用户id */
 	kuid_t uid = sock_i_uid((struct sock *)sk);
 
 	/*
@@ -146,11 +154,26 @@ static int inet_csk_bind_conflict(const struct sock *sk,
 	 * one this bucket belongs to.
 	 */
 
+    /* 遍历所有绑定控制块 */
 	sk_for_each_bound(sk2, &tb->owners) {
-		if (sk != sk2 &&
+		if (sk != sk2 && /* 控制块不同 */
+		    /* 输出报文的网络接口号为0或者相等 */
 		    (!sk->sk_bound_dev_if ||
 		     !sk2->sk_bound_dev_if ||
 		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if)) {
+		    /*
+		     * 检查冲突的情况：
+		     * 如果：启用地址重用 && 不处于TCP_LISTEN：
+		     *      1.非宽松模式
+		     *      2.不考虑端口重用&&启用端口重用&&已经处于监听状态&&(TIME_WAIT||相同用户ID的进程)
+		     *
+		     * 如果：
+		     *      1.不考虑端口重用
+		     *      2.不启用端口重用
+		     *      3.处于非监听状态
+		     *      4.非TIME_WAIT&&不同用户ID的进程
+		     */
+
 			if (reuse && sk2->sk_reuse &&
 			    sk2->sk_state != TCP_LISTEN) {
 				if ((!relax ||
@@ -159,16 +182,52 @@ static int inet_csk_bind_conflict(const struct sock *sk,
 				      !rcu_access_pointer(sk->sk_reuseport_cb) &&
 				      (sk2->sk_state == TCP_TIME_WAIT ||
 				       uid_eq(uid, sock_i_uid(sk2))))) &&
-				    inet_rcv_saddr_equal(sk, sk2, true))
+				    inet_rcv_saddr_equal(sk, sk2, true)) /* 检查冲突 */
 					break;
 			} else if (!reuseport_ok ||
 				   !reuseport || !sk2->sk_reuseport ||
 				   rcu_access_pointer(sk->sk_reuseport_cb) ||
 				   (sk2->sk_state != TCP_TIME_WAIT &&
 				    !uid_eq(uid, sock_i_uid(sk2)))) {
+
 				if (inet_rcv_saddr_equal(sk, sk2, true))
 					break;
 			}
+
+			// 这块逻辑在以前版本感觉挺有意思
+            /*
+             * 未启用地址重用 && 未启用端口重用：检查冲突；
+             * 启用了地址重用 && 未启用端口重用：状态是LISTEN才检查冲突；
+             * 未启用地址重用 && 启用了端口重用：状态不是TIME_WAIT并且不是同一有效用户ID时，检查冲突；
+             *                              也就是说，假若是TIME_WAIT，则不需要检查；
+             *                              假如不是TIME_WAIT，但是有效用户ID相同，也不需要检查；
+             * 启用了地址重用 && 启用了端口重用：状态是LISTEN时，可能需要检查，需要继续判断端口重用，
+             *                              这时候只当有效用户ID不相同的时候，才需要检查；
+             *                              就是说，可以相同用户ID的进程可以同时LISTEN多个相同的地址+端口；
+             */
+			/*
+			 * if ((!reuse || !sk2->sk_reuse ||
+                 sk2->sk_state == TCP_LISTEN) &&
+                 (!reuseport || !sk2->sk_reuseport ||
+                  rcu_access_pointer(sk->sk_reuseport_cb) ||
+                  (sk2->sk_state != TCP_TIME_WAIT &&
+                  !uid_eq(uid, sock_i_uid(sk2))))) {
+                 if (inet_rcv_saddr_equal(sk, sk2, true))
+                    break;
+                }
+
+			  /* 上面不需要判断的走到这里的情况 */
+			  /* 情况1.新旧绑定都设置了地址重用，状态不是LISTEN ，不满足本条，继续下面2
+              /* 情况2.新旧绑定都设置了端口重用，状态是TIME_WAIT或者用户ID相等
+
+              /* 上面1情况如果不放宽检查，则检查
+			   if (!relax && reuse && sk2->sk_reuse &&
+                    sk2->sk_state != TCP_LISTEN) {
+                    /* 地址相同，冲突
+                    if (inet_rcv_saddr_equal(sk, sk2, true))
+                        break;
+                }
+			 */
 		}
 	}
 	return sk2 != NULL;
@@ -193,47 +252,68 @@ inet_csk_find_open_port(struct sock *sk, struct inet_bind_bucket **tb_ret, int *
 
 	l3mdev = inet_sk_bound_l3mdev(sk);
 ports_exhausted:
+    /* 地址重用则attempt_half设置为1 */
 	attempt_half = (sk->sk_reuse == SK_CAN_REUSE) ? 1 : 0;
 other_half_scan:
+    /* 获取端口范围区间 */
 	inet_get_local_port_range(net, &low, &high);
 	high++; /* [32768, 60999] -> [32768, 61000[ */
+    /* 端口范围很小，attempt_half设置为0 */
 	if (high - low < 4)
 		attempt_half = 0;
+    /* attempt_half不为0 */
 	if (attempt_half) {
+        /* 找到一半的位置 */
 		int half = low + (((high - low) >> 2) << 1);
 
+        /* 第一次尝试低一半 */
 		if (attempt_half == 1)
 			high = half;
 		else
 			low = half;
 	}
+    /* 地址数 */
 	remaining = high - low;
 	if (likely(remaining > 1))
+        /* 地址数消除低位 */
 		remaining &= ~1U;
 
+    /* 随机一个偏移 */
 	offset = prandom_u32() % remaining;
 	/* __inet_hash_connect() favors ports having @low parity
 	 * We do the opposite to not pollute connect() users.
 	 */
+    /* 偏移低位置1 ，方便下面分半遍历端口*/
 	offset |= 1U;
 
 other_parity_scan:
+    /* 取一个端口 */
 	port = low + offset;
+    /* 遍历查找合适端口，先遍历一半端口 */
 	for (i = 0; i < remaining; i += 2, port += 2) {
 		if (unlikely(port >= high))
 			port -= remaining;
+        /* 如果端口配置为保留端口，继续下一个端口 */
 		if (inet_is_local_reserved_port(net, port))
 			continue;
+        /* 找到该端口对应的绑定端口列表 */
 		head = &hinfo->bhash[inet_bhashfn(net, port,
 						  hinfo->bhash_size)];
 		spin_lock_bh(&head->lock);
+        /* 遍历该链表 */
 		inet_bind_bucket_for_each(tb, &head->chain)
+            /* 同一个命名空间&& 端口相同 */
 			if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
 			    tb->port == port) {
+                /* 这里不进行网络命名空间的比较，调用函数需要先确保tb与套接口sk位于相同的命名空间
+                 * 注意，随机端口，需要进行严谨的检查，并且不能使用端口重用 */
 				if (!inet_csk_bind_conflict(sk, tb, relax, false))
+                    /* 绑定无冲突，成功 */
 					goto success;
+                /* 有冲突，下一个端口 */
 				goto next_port;
 			}
+        /* 没有命名空间和端口相同，成功 */
 		tb = NULL;
 		goto success;
 next_port:
@@ -241,10 +321,12 @@ next_port:
 		cond_resched();
 	}
 
+    /* 遍历另外一半端口 */
 	offset--;
 	if (!(offset & 1))
 		goto other_parity_scan;
 
+    /* 端口均不能用，则尝试高位端口的一半 */
 	if (attempt_half == 1) {
 		/* OK we now try the upper half of the range */
 		attempt_half = 2;
@@ -257,6 +339,7 @@ next_port:
 		goto ports_exhausted;
 	}
 	return NULL;
+    /* 成功返回端口和节点(有端口相同时不为NULL) */
 success:
 	*port_ret = port;
 	*tb_ret = tb;
@@ -268,12 +351,16 @@ static inline int sk_reuseport_match(struct inet_bind_bucket *tb,
 {
 	kuid_t uid = sock_i_uid(sk);
 
+	// fastreuseport小于等于零，表明tb的端口重用已经关闭，直接返回零，不匹配
 	if (tb->fastreuseport <= 0)
 		return 0;
+	//  套接口sk没有开启端口重用
 	if (!sk->sk_reuseport)
 		return 0;
+	// 套接口sk的成员sk_reuseport_cb不为空，已经处于监听状态
 	if (rcu_access_pointer(sk->sk_reuseport_cb))
 		return 0;
+	// 套接口sk的uid与tb的uid不相同
 	if (!uid_eq(tb->fastuid, uid))
 		return 0;
 	/* We only need to check the rcv_saddr if this tb was once marked
@@ -300,8 +387,18 @@ static inline int sk_reuseport_match(struct inet_bind_bucket *tb,
  * if snum is zero it means select any available local port.
  * We try to allocate an odd port (and leave even ports for connect())
  */
+/*
+ * 1.判断端口是用户指定还是系统随机指定？用户指定需要判断port是否被重复绑定（相同IP地址）
+ * 2.如果应用程序没有指明要绑定的端口，那么首先分配一个可用的端口，并将其加入到端口hash表中；
+ * 3.拿到了可用端口后，如果是尚未分配的，那么需要创建对应的端口信息 tb，
+ *      即struct inet_bind_bucket，并初始化其中的各个字段；
+ *      如果是已经分配了的端口，那么发生了端口复用，更新已有的struct inet_bind_bucket字段即可；
+ * 4.创建 tb 完成后，将 tb 加入到TCP的icsk_bind_hash中，再将该TCB加入到端口信息的owner链表中，
+ *      即建立TCB和端口信息结构之间的映射关系。
+ */
 int inet_csk_get_port(struct sock *sk, unsigned short snum)
 {
+    // snum就是应用调用bind()时指定的端口号
 	bool reuse = sk->sk_reuse && sk->sk_state != TCP_LISTEN;
 	struct inet_hashinfo *hinfo = sk->sk_prot->h.hashinfo;
 	int ret = 1, port = snum;
@@ -313,7 +410,7 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
 
 	l3mdev = inet_sk_bound_l3mdev(sk);
 
-	if (!port) {
+	if (!port) { // 应用没有指明要绑定哪个端口，需要由内核自动选择一个
 		head = inet_csk_find_open_port(sk, &tb, &port);
 		if (!head)
 			return ret;
@@ -321,26 +418,51 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
 			goto tb_not_found;
 		goto success;
 	}
+    // 应用程序指明了要绑定的端口号，直接找到对应的哈希列表
 	head = &hinfo->bhash[inet_bhashfn(net, port,
 					  hinfo->bhash_size)];
 	spin_lock_bh(&head->lock);
+    // 遍历该哈希列表：
+    // 1. 如果能够找到该端口号，说明该端口号已经被其它套接字绑定过了（相同ip、port），这时需要跳转到
+    //		tb_found标签处继续判断该端口是否允许复用.
+    // 2. 如果该循环没有找到该端口号，那么说明应用程序指定的端口号还没有被绑定过
 	inet_bind_bucket_for_each(tb, &head->chain)
 		if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
 		    tb->port == port)
 			goto tb_found;
+
+    // 到这里有两种情况：
+    // 1. 动态绑定场景：找到了一个可用的空闲端口号
+    // 2. 应用程序指定了端口号场景：该端口号尚未被任何套接字绑定过
+    // 这两种场景都需要跳转到tb_not_found处创建端口信息结构struct inet_bind_bucket，
+    // 并将其加入到TCP的bhash表中
 tb_not_found:
+    // 根据snum创建一个新的端口信息结构并将该结构加入到bhash中
 	tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep,
 				     net, head, port, l3mdev);
 	if (!tb)
 		goto fail_unlock;
 tb_found:
+    /* 将对应端口的 socket 保存在哈希表的 bucket 里，在这个过程中，需要判断
+     * 端口冲突情况，要注意 SO_REUSEADDR 和 SO_REUSEPORT 这两个设置项，
+     * 它们允许端口重复使用。 */
+    //到这里说明要绑定的端口已经被其它套接字绑定，这时需要判断端口是否允许被复用。
+    //这里之所以还要判断owners链表不为空，是为了让该函数提供端口检查的功能：即判
+    //断是否已经当前套接字是否已经绑定了指定端口，如果绑定了，那么直接返回成功，
+
+    // 下面实际上就是判断端口是否可以复用的逻辑，如果判断可以复用，那么绑定成功，否则绑定失败
+    // 如果此port已被bind
 	if (!hlist_empty(&tb->owners)) {
 		if (sk->sk_reuse == SK_FORCE_REUSE)
 			goto success;
 
+        // 已经存在的sock和当前新sock都开启了SO_REUSEADDR,且当前sock状态不为listen
+        // 或者
+        // 已经存在的sock和当前新sock都开启了SO_REUSEPORT,而且两者都是同一个用户
 		if ((tb->fastreuse > 0 && reuse) ||
 		    sk_reuseport_match(tb, sk))
 			goto success;
+        // 若端口号不冲突，则选择这个端口
 		if (inet_csk_bind_conflict(sk, tb, true, true))
 			goto fail_unlock;
 	}
@@ -363,6 +485,13 @@ success:
 		if (!reuse)
 			tb->fastreuse = 0;
 		if (sk->sk_reuseport) {
+		    /*
+		     * 如果套接口开启了端口号重用功能，检查套接口是否与tb相匹配（参见以下对函数sk_reuseport_match的介绍）。
+		     * 如果不匹配，表明当前tb中的套接口并不支持端口重用，由于套接口sk并不与当前tb中的套接口冲突，
+		     * 在将套接口sk加入之后，将使用当前的套接口sk信息，更新tb中的端口重用缓存信息，
+		     * 这样可允许之后加入的套接口与sk进行快速匹配，并且将fastreuseport设置为FASTREUSEPORT_STRICT，
+		     * 对以后要加入重用端口号的套接口执行相对严格的地址检查。
+		     */
 			/* We didn't match or we don't have fastreuseport set on
 			 * the tb, but we have sk_reuseport set on this socket
 			 * and we know that there are no bind conflicts with
@@ -388,6 +517,8 @@ success:
 			tb->fastreuseport = 0;
 		}
 	}
+    // 使得TCB的icsk_bind_hash成员指向端口信息结构，并将该TCB加入到端口信息的owner链表中，
+    // 即建立TCB和端口信息结构之间的相互关联关系
 	if (!inet_csk(sk)->icsk_bind_hash)
 		inet_bind_hash(sk, tb, port);
 	WARN_ON(inet_csk(sk)->icsk_bind_hash != tb);
@@ -927,7 +1058,7 @@ int inet_csk_listen_start(struct sock *sk, int backlog)
 		inet->inet_sport = htons(inet->inet_num);
 
 		sk_dst_reset(sk);
-		err = sk->sk_prot->hash(sk);
+		err = sk->sk_prot->hash(sk); //会将tcp_request_sock结构体加入到listen hash结构里
 
 		if (likely(!err))
 			return 0;

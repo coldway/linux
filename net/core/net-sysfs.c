@@ -736,26 +736,30 @@ static ssize_t show_rps_map(struct netdev_rx_queue *queue, char *buf)
 	return len < PAGE_SIZE ? len : -EINVAL;
 }
 
-static ssize_t store_rps_map(struct netdev_rx_queue *queue,
+// 进行RPS的CPU映射表解析，即对文件/sys/class/net/eth0/queues/rx-0/rps_cpus
+// 中的内容进行解析。
+static ssize_t store_rps_map(struct netdev_rx_queue *queue,// 接受队列
 			     const char *buf, size_t len)
 {
 	struct rps_map *old_map, *map;
 	cpumask_var_t mask;
 	int err, cpu, i;
-	static DEFINE_MUTEX(rps_map_mutex);
+	static DEFINE_MUTEX(rps_map_mutex); // 映射表互斥锁
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN)) // 管理员权限
 		return -EPERM;
 
 	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
 		return -ENOMEM;
 
+	// 解析buf中的信息到mask中
 	err = bitmap_parse(buf, len, cpumask_bits(mask), nr_cpumask_bits);
 	if (err) {
 		free_cpumask_var(mask);
 		return err;
 	}
 
+	// 分配映射表
 	map = kzalloc(max_t(unsigned int,
 			    RPS_MAP_SIZE(cpumask_weight(mask)), L1_CACHE_BYTES),
 		      GFP_KERNEL);
@@ -764,25 +768,30 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 		return -ENOMEM;
 	}
 
+	// 解析每一个cpu的bit
 	i = 0;
 	for_each_cpu_and(cpu, mask, cpu_online_mask)
-		map->cpus[i++] = cpu;
+		map->cpus[i++] = cpu; // 设置对应的cpu编号
 
 	if (i) {
-		map->len = i;
+		map->len = i; // 个数
 	} else {
 		kfree(map);
 		map = NULL;
 	}
 
 	mutex_lock(&rps_map_mutex);
+	// 进行rcu替换
 	old_map = rcu_dereference_protected(queue->rps_map,
 					    mutex_is_locked(&rps_map_mutex));
 	rcu_assign_pointer(queue->rps_map, map);
 
+	// 设置是否需要进行rps
 	if (map)
+	    // 新配置则加1
 		static_branch_inc(&rps_needed);
 	if (old_map)
+	    // 去掉老的配置减掉1
 		static_branch_dec(&rps_needed);
 
 	mutex_unlock(&rps_map_mutex);
