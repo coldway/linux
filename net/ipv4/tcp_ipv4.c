@@ -1664,16 +1664,21 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	if (sk->sk_state == TCP_LISTEN) {
         // 说明收到的是三次握手第一步SYN或者第三步ACK,这里是服务器端的情况
 
-        // syncookie检查，因为没有syn包没有ack选项，因此忽略， 如果syncookie验证通过则创建新的
+        // syncookie检查
+        // 没有开启syncookie 就直接返回原sk
+        // syn包：因为没有syn包没有ack选项，因此忽略。
+        // syn-ack包：如果syncookie验证通过则创建新的套接字，然后在后面tcp_child_process时调用 tcp_rcv_state_proces 处理此ack包
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 
 		if (!nsk)
 			goto discard;
-        /* 如果是第一次握手的SYN，这里的nsk应该是'父'sk,
-         * 如果这里是三次握手的第三步ACK，则这里的nsk是‘子'sk
+        /* 在开启 syn cookie时
+         * 如果是第一次握手的SYN，这里的nsk就是自己,
+         * 如果这里是三次握手的第三步ACK，则这里的nsk是‘子'sk 即新建的sk
          */
 		if (nsk != sk) {
-			if (tcp_child_process(sk, nsk, skb)) {// tcp_child_process还是会调用tcp_rcv_state_proces
+			if (tcp_child_process(sk, nsk, skb)) {// tcp_child_process还是会调用 tcp_rcv_state_proces
+			    // 处理出错，直接RST
 				rsk = nsk;
 				goto reset;
 			}
@@ -1958,7 +1963,9 @@ int tcp_v4_rcv(struct sk_buff *skb)
     /* 取ip头 */
 	iph = ip_hdr(skb);
 lookup:
-    /* 查找控制块 */
+    /* 查找控制块
+     * 先查找e sock，然后查找lis sock
+     */
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
 			       th->dest, sdif, &refcounted);
 	if (!sk)
@@ -1969,13 +1976,17 @@ process:
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
 
-    /* TCP_NEW_SYN_RECV状态处理 */
+    /* TCP_NEW_SYN_RECV状态处理
+     * 此状态是已经接收到了syn
+     */
 	if (sk->sk_state == TCP_NEW_SYN_RECV) {
-		struct request_sock *req = inet_reqsk(sk);
+		struct request_sock *req = inet_reqsk(sk); // sock强制转换为request_sock
 		bool req_stolen = false;
 		struct sock *nsk;
 
-        /* 获取控制块 */
+        /* 获取控制块
+         * 这个是LISTEN tcp_sock
+         */
 		sk = req->rsk_listener;
 		if (unlikely(tcp_v4_inbound_md5_hash(sk, skb, dif, sdif))) {
 			sk_drops_add(sk, skb);
@@ -1988,6 +1999,7 @@ process:
 		}
         /* 不是listen状态 */
 		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+		    /* 如果不是Listen状态的tcp_sock说明有问题不是目标sk */
             /* 从连接队列移除控制块 */
 			inet_csk_reqsk_queue_drop_and_put(sk, req);
             /* 根据skb参数重新查找控制块 */

@@ -340,7 +340,7 @@ struct sock *tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
 			      struct tcp_fastopen_cookie *foc,
 			      const struct dst_entry *dst)
 {
-	bool syn_data = TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq + 1;
+	bool syn_data = TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq + 1; //表明本次携带了数据
 	int tcp_fastopen = sock_net(sk)->ipv4.sysctl_tcp_fastopen;
 	struct tcp_fastopen_cookie valid_foc = { .len = -1 };
 	struct sock *child;

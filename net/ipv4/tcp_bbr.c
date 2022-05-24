@@ -175,6 +175,9 @@ static const u32 bbr_cycle_rand = 7;
 /* Try to keep at least this many packets in flight, if things go smoothly. For
  * smooth functioning, a sliding window protocol ACKing every other packet
  * needs at least 4 packets in flight:
+ * 至少4个而不是1个是因为考虑到以下因素
+ * （1）可能会有ACK延迟累积发送机制存在
+ * （2）往返各2各则一共至少4个
  */
 static const u32 bbr_cwnd_min_target = 4;
 
@@ -269,7 +272,8 @@ static unsigned long bbr_bw_to_pacing_rate(struct sock *sk, u32 bw, int gain)
 	return rate;
 }
 
-/* Initialize pacing rate to: high_gain * init_cwnd / RTT. */
+/* 初始化pacing rate
+ * Initialize pacing rate to: high_gain * init_cwnd / RTT. */
 static void bbr_init_pacing_rate_from_rtt(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -297,6 +301,7 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 	struct bbr *bbr = inet_csk_ca(sk);
 	unsigned long rate = bbr_bw_to_pacing_rate(sk, bw, gain);
 
+	// 如果没有rtt，初始化pace
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
 	// 带宽已占满，或者计算的pacing速率大于当前使用的速率sk_pacing_rate，更新当前速率
@@ -396,6 +401,7 @@ static u32 bbr_bdp(struct sock *sk, u32 bw, int gain)
  *   - one skb in sending host Qdisc,
  *   - one skb in sending host TSO/GSO engine
  *   - one skb being received by receiver host LRO/GRO/delayed-ACK engine
+ * 此处解释为啥最少需要4个包
  * Don't worry, at low rates (bbr_min_tso_rate) this won't bloat cwnd because
  * in such cases tso_segs_goal is 1. The minimum cwnd is 4 packets,
  * which allows 2 outstanding 2-packet sequences, to try to keep pipe
@@ -472,7 +478,7 @@ static u32 bbr_ack_aggregation_cwnd(struct sock *sk)
 				/ BW_UNIT;
 		aggr_cwnd = (bbr_extra_acked_gain * bbr_extra_acked(sk))
 			     >> BBR_SCALE;
-		aggr_cwnd = min(aggr_cwnd, max_aggr_cwnd);
+		aggr_cwnd = min(aggr_cwnd, max_aggr_cwnd); // extra_acked不能超过bw * bbr_extra_acked_max_us(100ms)
 	}
 
 	return aggr_cwnd;
@@ -632,6 +638,7 @@ static void bbr_reset_probe_bw_mode(struct sock *sk)
 	bbr_advance_cycle_phase(sk);	/* flip to next phase of gain cycle */
 }
 
+/*PROBE_RTT结束后的状态重置*/
 static void bbr_reset_mode(struct sock *sk)
 {
 	if (!bbr_full_bw_reached(sk))
@@ -693,6 +700,8 @@ static void bbr_lt_bw_interval_done(struct sock *sk, u32 bw)
  * estimate that we're policed if we see 2 consecutive sampling intervals with
  * consistent throughput and high packet loss. If we think we're being policed,
  * set lt_bw to the "long-term" average delivery rate from those 2 intervals.
+ * 我们估计，如果我们看到 2 个连续采样间隔具有一致的吞吐量和高丢包率，我们就会受到监管。
+ * 如果我们认为我们受到监管，请将 lt_bw 设置为这两个时间间隔的“长期”平均交付率。
  */
 static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 {
@@ -818,6 +827,7 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	 * phase when app writes faster than the network can deliver :)
 	 */
     // 加入新的样本
+    // 过滤掉应用程序限制的样本
 	if (!rs->is_app_limited || bw >= bbr_max_bw(sk)) {
 		/* Incorporate new sample into our max bw filter. */
 		/* 带宽和minirtt样本加入新的rtt、bw样本 */
@@ -837,6 +847,18 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
  * Max extra_acked is clamped by cwnd and bw * bbr_extra_acked_max_us (100 ms).
  * Max filter is an approximate sliding window of 5-10 (packet timed) round
  * trips.
+ *
+ * 这用于提供额外的飞行中数据以在 ACK 间静默期间继续发送
+ *
+ * 确认聚合的程度被估计为超出预期的额外数据
+ *
+ * max_extra_acked = "最近确认的超出 max_bw * 间隔的最大过量数据"
+ *
+ * cwnd += max_extra_acked
+ *
+ * 最大 extra_acked 由 cwnd 和 bw * bbr_extra_acked_max_us (100 ms) 限制。
+ * 最大过滤器是 5-10（分组定时）往返的近似滑动窗口。
+ *
  */
 static void bbr_update_ack_aggregation(struct sock *sk,
 				       const struct rate_sample *rs)
@@ -892,10 +914,15 @@ static void bbr_update_ack_aggregation(struct sock *sk,
 /* Estimate when the pipe is full, using the change in delivery rate: BBR
  * estimates that STARTUP filled the pipe if the estimated bw hasn't changed by
  * at least bbr_full_bw_thresh (25%) after bbr_full_bw_cnt (3) non-app-limited
+ * 通过三轮未增加带宽检测
  * rounds. Why 3 rounds: 1: rwin autotuning grows the rwin, 2: we fill the
  * higher rwin, 3: we get higher delivery rate samples. Or transient
  * cross-traffic or radio noise can go away. CUBIC Hystart shares a similar
  * design goal, but uses delay and inter-ACK spacing instead of bandwidth.
+ *
+ * 第一轮接收窗口探测到了带宽的增加并增加窗口
+ * 第二轮填满接收窗口
+ * 第三轮返回高的传输速率
  */
 static void bbr_check_full_bw_reached(struct sock *sk,
 				      const struct rate_sample *rs)
@@ -916,11 +943,12 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 	}
 	// bw未增加，full_bw_cnt++
 	++bbr->full_bw_cnt;
-	// 三次带宽也就是bw没有增加。记录需要排空管道
+	// 三次带宽(bw)没有增加。记录需要排空管道
 	bbr->full_bw_reached = bbr->full_bw_cnt >= bbr_full_bw_cnt;
 }
 
-/* If pipe is probably full, drain the queue and then enter steady-state. */
+/* STARTUP后期，检查管道是否满了，满了则切换至DRAIN
+ * If pipe is probably full, drain the queue and then enter steady-state. */
 static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
@@ -929,11 +957,11 @@ static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 	    // 经过三轮bw没有增长，直接进入drain模式，清空queue
 		bbr->mode = BBR_DRAIN;	/* drain queue we created */
 		tcp_sk(sk)->snd_ssthresh =
-				bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT);
+				bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT); // 修改发送阈值。其实也就是当前的BDP
 	}	/* fall through to check if in-flight is already small: */
 	if (bbr->mode == BBR_DRAIN &&
 	    bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tcp_sk(sk))) <=
-	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT)) // drain模式且inflight小于 当前最大BDP管道
+	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT)) // drain模式且inflight小于当前最大BDP管道
 	    // 进入稳定状态 同时进入gain cycle循环
 		bbr_reset_probe_bw_mode(sk);  /* we estimate queue is drained */
 }
@@ -970,6 +998,8 @@ static void bbr_check_probe_rtt_done(struct sock *sk)
  * natural silences or low-rate periods within 10 seconds where the rate is low
  * enough for long enough to drain its queue in the bottleneck. We pick up
  * these min RTT measurements opportunistically with our min_rtt filter. :-)
+ *
+ * 若在PROBE_RTT结束时，根据当前网络状况决定进入STARTUP还是PROBE_BW
  */
 static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 {

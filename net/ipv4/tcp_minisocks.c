@@ -836,9 +836,12 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 	sk_mark_napi_id(child, skb);
 
 	tcp_segs_in(tcp_sk(child), skb);
+    // 如果用户进程没有锁住child，则让child重新处理该ACK报文，这可以让child
+    // 套接字由TCP_SYN_RECV迁移到TCP_ESTABLISH状态
 	if (!sock_owned_by_user(child)) {
 		ret = tcp_rcv_state_process(child, skb);
 		/* Wakeup parent, send SIGIO */
+        // child套接字状态发生了迁移，唤醒监听套接字上的进程，可能由于调用accept()而block
 		if (state == TCP_SYN_RECV && child->sk_state != state)
 			parent->sk_data_ready(parent);
 	} else {
@@ -846,6 +849,7 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 		 * in main socket hash table and lock on listening
 		 * socket does not protect us more.
 		 */
+        // 缓存该skb后续处理
 		__sk_add_backlog(child, skb);
 	}
 

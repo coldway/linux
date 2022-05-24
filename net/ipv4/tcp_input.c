@@ -3977,8 +3977,8 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
         // 需要更新sock中的snd_wl1字段
 		tcp_update_wl(tp, ack_seq);
         /* 更新未确认的数据位置，即窗口左边沿 */
-		tcp_snd_una_update(tp, ack);
-		flag |= FLAG_WIN_UPDATE; // 窗口更新标识
+		tcp_snd_una_update(tp, ack);// 主要更新snd_una
+		flag |= FLAG_WIN_UPDATE;    // 窗口更新标识
 
         //如果拥塞控制算法有in_ack_event方法，便调用
 		tcp_in_ack_event(sk, CA_ACK_WIN_UPDATE);
@@ -6778,9 +6778,8 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 	case TCP_LISTEN:
         //服务器端收到SYN
         /*
-         * 在半连接的LISTEN状态下，只处理SYN段。如果是
-         * ACK段，此时连接尚未开始建立，因此返回1。在调用
-         * tcp_rcv_state_process()函数中会给对方发送RST段；
+         * 在半连接的LISTEN状态下，只处理SYN段。
+         * 如果是ACK段，此时连接尚未开始建立，因此返回1。k在调用 tcp_rcv_state_process()函数中会给对方发送RST段；
          * 如果接收的是RST段，则丢弃
          */
 		if (th->ack)
@@ -6796,8 +6795,8 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 			 * so we need to make sure to disable BH and RCU right there.
 			 */
             /*
-             * 处理SYN段，主要由conn_request接口(TCP中为tcp_v4_conn_request)处理，
-             * icsk_af_ops成员在创建套接字时被初始化，参见tcp_v4_init_sock()
+             * 处理SYN段，主要由conn_request接口(TCP中为 tcp_v4_conn_request )处理，
+             * icsk_af_ops 成员在创建套接字时被初始化，参见 int tcp_v4_init_sock()
              */
             /*
              * 收到三次握手的第一步SYN，
@@ -7284,7 +7283,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		     struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_fastopen_cookie foc = { .len = -1 };
-	__u32 isn = TCP_SKB_CB(skb)->tcp_tw_isn;
+	__u32 isn = TCP_SKB_CB(skb)->tcp_tw_isn; // 是否是timewait状态的包。即是说此包到来时，sk的状态为timewait
 	struct tcp_options_received tmp_opt;
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct net *net = sock_net(sk);
@@ -7293,8 +7292,8 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	bool want_cookie = false;
 	struct dst_entry *dst;
     /*
-     * 如果启用了cookie机制，则会在第三步收到ACK的时候在tcp_v4_syn_recv_sock中
-     * 的cookie_v4_check对之前发送的ack+syn进行检查，检查过程见cookie_v4_check
+     * 如果启用了cookie机制，则会在第三步收到ACK的时候在 tcp_v4_syn_recv_sock 中
+     * 的 cookie_v4_check 对之前发送的 ack+syn 进行检查，检查过程见 cookie_v4_check
      */
 	struct flowi fl;
 
@@ -7302,10 +7301,10 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	 * limitations, they conserve resources and peer is
 	 * evidently real one.
 	 */
-	if ((net->ipv4.sysctl_tcp_syncookies == 2 || // sysctl_tcp_syncookies=2无条件生成syncookie
-	     inet_csk_reqsk_queue_is_full(sk)) && !isn) { // 或者半连接队列太长,并且当前不是timewait
-		want_cookie = tcp_syn_flood_action(sk, rsk_ops->slab_name); // sysctl_tcp_syncookies>0,并未当前socket打印一次告警
-		if (!want_cookie) // 队列满了，但不使用syncookie，则丢弃
+	if ((net->ipv4.sysctl_tcp_syncookies == 2 || // sysctl_tcp_syncookies =2 无条件生成 syncookie
+	     inet_csk_reqsk_queue_is_full(sk)) && !isn) { // 或者request sock的accept队列（半连接队列）太长,并且当前不是 timewait
+		want_cookie = tcp_syn_flood_action(sk, rsk_ops->slab_name); // sysctl_tcp_syncookies > 0,并未当前 socket 打印一次告警。还有一个功能是置位是否发起synflood警告
+		if (!want_cookie) // 队列满了，但不使用syncookie，则丢弃（如果使用syn cookie机制，不需要保存request sock，所以不需要受到accept queue的限制）
 			goto drop;
 	}
 
@@ -7329,8 +7328,8 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
      * 块，用于保存连接请求信息，同时初始化在建立连接过程中用来发送
      * ACK、RST段的操作集合，以便在建立连接过程中能方便地调用这些接口
      */
-    // rsk_ops  ===tcp_request_sock_ops
-	req = inet_reqsk_alloc(rsk_ops, sk, !want_cookie); //分配request_sock， 进入TCP_NEW_SYN_RECV状态
+    // rsk_ops  === tcp_request_sock_ops
+	req = inet_reqsk_alloc(rsk_ops, sk, !want_cookie); //分配request_sock， 进入TCP_NEW_SYN_RECV状态，但不会保存到accept queue中
 	if (!req)
 		goto drop;
 
@@ -7351,10 +7350,10 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
      * 解析SYN段中的TCP选项
      */
 	tcp_parse_options(sock_net(sk), skb, &tmp_opt, 0,
-			  want_cookie ? NULL : &foc); // 开启syncookie后则不用考虑fastopen， syncookie不允许使用tcp扩展
+			  want_cookie ? NULL : &foc); // 开启syncookie后则不用考虑fastopen， syncookie不允许使用tcp扩展。//如果使用syn cookie，则不能使用fast open功能，因为无处存储相关信息
 
 	if (want_cookie && !tmp_opt.saw_tstamp) // 开启syncookie，但是不带timestamp
-		tcp_clear_options(&tmp_opt); // s清除wscale，sack_ok等选项，因为没地方存
+		tcp_clear_options(&tmp_opt); // 清除wscale，sack_ok等选项，不支持SACK和窗口扩大选项，因为没地方存
 
 
 	if (IS_ENABLED(CONFIG_SMC) && want_cookie)
@@ -7448,7 +7447,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
          */
         // 如果开启了syncookie选项，则需要检查收到的第三步ack和这个isn值是否一致
 		isn = cookie_init_sequence(af_ops, sk, skb, &req->mss);
-        // cookie_v4_init_sequence生成syncookie，并作为ack的起始序号
+        // cookie_v4_init_sequence 生成syncookie，并作为ack的起始序号
 		req->cookie_ts = tmp_opt.tstamp_ok;
 		if (!tmp_opt.tstamp_ok)
 			inet_rsk(req)->ecn_ok = 0;
@@ -7462,9 +7461,9 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		tcp_reqsk_record_syn(sk, req, skb); // 如果设置保存TCP_SAVE_SYN标记，则保存
 		fastopen_sk = tcp_try_fastopen(sk, skb, req, &foc, dst); // 验证后创建fastopen sock，并把数据部分放入接收队列中
 	}
-	if (fastopen_sk) { // 验证并创建fastsocket成功, 进入TCP_SYN_RCV状态
+	if (fastopen_sk) { // 验证并创建fastsocket成功, 进入 TCP_SYN_RECV 状态
 		af_ops->send_synack(fastopen_sk, dst, &fl, req,
-				    &foc, TCP_SYNACK_FASTOPEN); // tcp_v4_send_synac
+				    &foc, TCP_SYNACK_FASTOPEN); // tcp_v4_send_synack
 		/* Add the child socket directly into the accept queue */
         // 添加到等待accept的队列
 		if (!inet_csk_reqsk_queue_add(sk, req, fastopen_sk)) {
@@ -7473,7 +7472,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 			sock_put(fastopen_sk);
 			goto drop_and_free;
 		}
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk); // 我猜这里唤醒是因为可以接收pkg？
 		bh_unlock_sock(fastopen_sk);
 		sock_put(fastopen_sk);
 	} else {

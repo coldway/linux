@@ -62,6 +62,7 @@ static u32 cookie_hash(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport,
  * Since subsequent timestamps use the normal tcp_time_stamp value, we
  * must make sure that the resulting initial timestamp is <= tcp_time_stamp.
  */
+// 将窗口扩大选项和选择确认选项的信息编码成为时间戳的值
 u64 cookie_init_timestamp(struct request_sock *req, u64 now)
 {
 	struct inet_request_sock *ireq;
@@ -70,8 +71,8 @@ u64 cookie_init_timestamp(struct request_sock *req, u64 now)
 
 	ireq = inet_rsk(req);
 
-	options = ireq->wscale_ok ? ireq->snd_wscale : TS_OPT_WSCALE_MASK;
-	if (ireq->sack_ok)
+	options = ireq->wscale_ok ? ireq->snd_wscale : TS_OPT_WSCALE_MASK; // 窗口扩大选项信息
+	if (ireq->sack_ok) // //选择确认选项信息
 		options |= TS_OPT_SACK;
 	if (ireq->ecn_ok)
 		options |= TS_OPT_ECN;
@@ -126,13 +127,13 @@ static __u32 check_tcp_syn_cookie(__u32 cookie, __be32 saddr, __be32 daddr,
 	cookie -= cookie_hash(saddr, daddr, sport, dport, 0, 0) + sseq;
 
 	/* Cookie is now reduced to (count * 2^24) ^ (hash % 2^24) */
-	diff = (count - (cookie >> COOKIEBITS)) & ((__u32) -1 >> COOKIEBITS);
-	if (diff >= MAX_SYNCOOKIE_AGE)
+	diff = (count - (cookie >> COOKIEBITS)) & ((__u32) -1 >> COOKIEBITS); // 计算从发出cookie到收到此cookie经历了几分钟
+	if (diff >= MAX_SYNCOOKIE_AGE) // 如果超过了maxdiff分钟，即为非法cookie
 		return (__u32)-1;
 
 	return (cookie -
 		cookie_hash(saddr, daddr, sport, dport, count - diff, 1))
-		& COOKIEMASK;	/* Leaving the data behind */
+		& COOKIEMASK;	/* Leaving the data behind */ // 找到生成cookie时隐藏的信息
 }
 
 /*
@@ -166,12 +167,12 @@ u32 __cookie_v4_init_sequence(const struct iphdr *iph, const struct tcphdr *th,
 
 	for (mssind = ARRAY_SIZE(msstab) - 1; mssind ; mssind--)
 		if (mss >= msstab[mssind])
-			break;
+			break; // 找到一个最小的“最大MSS”值
 	*mssp = msstab[mssind];
 
 	return secure_tcp_syn_cookie(iph->saddr, iph->daddr,
 				     th->source, th->dest, ntohl(th->seq),
-				     mssind);
+				     mssind); // 生成cookie
 }
 EXPORT_SYMBOL_GPL(__cookie_v4_init_sequence);
 
@@ -192,9 +193,9 @@ int __cookie_v4_check(const struct iphdr *iph, const struct tcphdr *th,
 {
 	__u32 seq = ntohl(th->seq) - 1;
 	__u32 mssind = check_tcp_syn_cookie(cookie, iph->saddr, iph->daddr,
-					    th->source, th->dest, seq);
+					    th->source, th->dest, seq); // 解码cookie，找到生成cookie时隐藏的msstab数组下标
 
-	return mssind < ARRAY_SIZE(msstab) ? msstab[mssind] : 0;
+	return mssind < ARRAY_SIZE(msstab) ? msstab[mssind] : 0; // 如果cookie非法，则返回0,否则返回最大MSS的值
 }
 EXPORT_SYMBOL_GPL(__cookie_v4_check);
 
@@ -300,11 +301,11 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb)
 	if (!sock_net(sk)->ipv4.sysctl_tcp_syncookies || !th->ack || th->rst)
 		goto out;
 
-	if (tcp_synq_no_recent_overflow(sk))
+	if (tcp_synq_no_recent_overflow(sk)) // listening socket的SYN accept queue最近没有溢出
 		goto out;
 
 	mss = __cookie_v4_check(ip_hdr(skb), th, cookie);
-	if (mss == 0) {
+	if (mss == 0) { // cookie不合法，没得到了收到SYN时存储的对端的MSS值
 		__NET_INC_STATS(sock_net(sk), LINUX_MIB_SYNCOOKIESFAILED);
 		goto out;
 	}
@@ -336,7 +337,7 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb)
 	treq->snt_isn		= cookie;
 	treq->ts_off		= 0;
 	treq->txhash		= net_tx_rndhash();
-	req->mss		= mss;
+	req->mss		= mss; // 记录解密后得到的MSS
 	ireq->ir_num		= ntohs(th->dest);
 	ireq->ir_rmt_port	= th->source;
 	sk_rcv_saddr_set(req_to_sk(req), ip_hdr(skb)->daddr);
