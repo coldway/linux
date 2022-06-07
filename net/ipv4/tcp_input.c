@@ -420,6 +420,15 @@ static void tcp_grow_window(struct sock *sk, const struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	int room;
 
+	/*
+	 * 慢启动窗口阈值实际上为当前的窗口钳制值，
+	 * 窗口增长的第一个条件就是，
+	 *      rcv_ssthresh值小于窗口钳制值，
+	 *      并且小于空闲的接收缓存空间，
+	 *      而且TCP协议的缓存空间未处于承压状态。
+	 * 之后，由于在函数tcp_grow_window调用之前，调用者已经对数据报文skb的truesize做了判断，将报文添加到了接收缓存队列中，
+	 * 这样意味着接收缓存增加truesize之后并未超出系统限定的套接口接收缓存长度。
+	 */
 	room = min_t(int, tp->window_clamp, tcp_space(sk)) - tp->rcv_ssthresh;
 
 	/* Check #1 */
@@ -429,9 +438,48 @@ static void tcp_grow_window(struct sock *sk, const struct sk_buff *skb)
 		/* Check #2. Increase window, if skb with such overhead
 		 * will fit to rcvbuf in future.
 		 */
+		/*
+		 * 第二个判断条件，有个前提是内核不能够将全部可用接收缓存通告为窗口，
+		 * 因为接收缓存不仅仅是保存TCP数据，还要有一部分空间用来保存skb结构等的元数据（额外开销），
+		 * 关于一定的空间有多少比例可以转化为窗口，内核使用函数tcp_win_from_space实现（默认1:1）。
+		 */
+		/*
+		 * 以下的判断是如果纯数据长度skb->len大于或者等于保存此数据的skb的总长度truesize所对应比例的通告窗口长度，
+		 * 也就是说对端发送的数据等于或者大于本地通告的窗口值，导致数据占用了一部分预留的额外开销空间，但是这没有关系，不会造成溢出。
+		 * 由于满足第一个条件即接收缓存还有空余，可放心的增大通告窗口，
+		 * 因为尽管对端可能发送大于窗口的数据，内核已经为增大的窗口预留了足够的额外开销空间，可存储超出窗口的纯数据长度，没有溢出风险。
+		 * 窗口值增加两倍的通告MSS。
+		 *  |-------------------------------->  sk->sk_rcvbuf  <--------------------------------------|
+            |                      |                         |
+            |--->   通告窗口    <---|--->    预留额外开销   <---|
+            |----------------------|---|---------------------|
+            |                          |                     |
+            |--->  接收纯数据长度     <--|---> 真实的额外开销 <---|
+            |------------> skb->truesize  <------------------|
+                                   |   |
+		                      ---> |   | <--借用的预留额外开销
+		 */
 		if (tcp_win_from_space(sk, skb->truesize) <= skb->len)
 			incr = 2 * tp->advmss;
 		else
+		    /*
+		     * 反之，如果纯数据skb->len长度小于按照skb->truesize长度通告的窗口比例，就比较危险了。
+		     * 由于真实的skb额外开销大于接收缓存预留的额外开销，此时再增大窗口将有可能导致skb额外开销超出接收缓存预留的额外开销空间。
+		     * 但是，这不是一定会溢出的，因为既然接收缓存的窗口空间有余量，数据包的额外开销也可借用其中一部分，逻辑见__tcp_grow_window函数。
+		     *  |-------------------------------->  sk->sk_rcvbuf  <--------------------------------------|
+		        |--->           最大通告窗口             <----|--->            预留额外开销               <---|
+                |-------------------------------------------|---------------------------------------------|
+                |                     |
+                |-->  当前通告窗口   <--|
+                |                     |
+                |-->   纯数据长度    <--|
+                |                     |
+                |----->  skb->truesize 对应通告窗口  <--------|
+                |                     |
+                |-> 对应通告窗口1/2   <-|
+                |                     |---------------------->  真实的额外开销空间   <-----------------------|
+                |--------------------------------->  skb->truesize   <------------------------------------|
+		     */
 			incr = __tcp_grow_window(sk, skb);
 
 		if (incr) {
@@ -461,9 +509,11 @@ static void tcp_init_buffer_space(struct sock *sk)
 
 	maxwin = tcp_full_space(sk);
 
+	// 如果当前的窗口钳制值window_clamp大于等于sk_rcvbuf对应的最大窗口值maxwin，将其限制在maxwin。
 	if (tp->window_clamp >= maxwin) {
 		tp->window_clamp = maxwin;
 
+		// 如果tcp_app_win有值，并且maxwin大于4倍的通告MSS，预留由window/2^tcp_app_win到mss之间的某个值作为应用空间使用
 		if (tcp_app_win && maxwin > 4 * tp->advmss)
 			tp->window_clamp = max(maxwin -
 					       (maxwin >> tcp_app_win),
@@ -476,6 +526,7 @@ static void tcp_init_buffer_space(struct sock *sk)
 	    tp->window_clamp + tp->advmss > maxwin)
 		tp->window_clamp = max(2 * tp->advmss, maxwin - tp->advmss);
 
+	// 慢启动窗口阈值rcv_ssthresh限制在window_clamp之内
 	tp->rcv_ssthresh = min(tp->rcv_ssthresh, tp->window_clamp);
 	tp->snd_cwnd_stamp = tcp_jiffies32;
 }
@@ -489,6 +540,14 @@ static void tcp_clamp_window(struct sock *sk)
 
 	icsk->icsk_ack.quick = 0;
 
+	/*
+	 * 在接收过程中，如果已分配的接收缓存超出限定的接收缓存值，使用tcp_clamp_window函数增加窗口的限制因素之一sk_rcvbuf的值，
+	 * 条件是sk_rcvbuf的值小于tcp_rmem定义的最大值、
+	 *      用户未锁定sk_rcvbuf的值
+	 *      TCP协议的总内存未处在承压状态以及
+	 *      TCP协议的总占用缓存小于限制值的最小值，所有这些条件都成立的话，
+	 * 将sk_rcvbuf的值更新为已分配接收缓存sk_rmem_alloc与tcp_rmem定义的最大值二者之中的较小值。
+	 */
 	if (sk->sk_rcvbuf < net->ipv4.sysctl_tcp_rmem[2] &&
 	    !(sk->sk_userlocks & SOCK_RCVBUF_LOCK) &&
 	    !tcp_under_memory_pressure(sk) &&
@@ -497,6 +556,11 @@ static void tcp_clamp_window(struct sock *sk)
 			   min(atomic_read(&sk->sk_rmem_alloc),
 			       net->ipv4.sysctl_tcp_rmem[2]));
 	}
+	/*
+	 * 如果已分配接收缓存sk_rmem_alloc仍旧大于sk_rcvbuf的值，
+	 * 将窗口限制因素之一的慢启动窗口阈值（rcv_ssthresh）更新为对外公布最大窗口值window_clamp和2倍的套接口通告MSS之中的最小值。
+	 * 在以上的窗口选择函数 __tcp_select_window 逻辑中，新的窗口值不能大于rcv_ssthresh的值。
+	 */
 	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf)
 		tp->rcv_ssthresh = min(tp->window_clamp, 2U * tp->advmss);
 }
@@ -731,7 +795,11 @@ static void tcp_event_data_recv(struct sock *sk, struct sk_buff *skb)
      * 增加的条件是rcv_ssthresh小于window_clamp,并且 rcv_ssthresh小于接收缓存剩余空间的3/4，
      * 同时tcp_memory_pressure没有被置位(即接收缓存中的数据量没有太大)。
      * tcp_grow_window中对新收到的skb的长度还有一些限制，并不总是增长rcv_ssthresh的值
-     * rcv_ssthresh是当前的接收窗口大小的一个阀值，其初始值就置为rcv_wnd。它跟rcv_wnd配合工作，当本地socket收到数据报，并满足一定条件时，增长rcv_ssthresh的值，在下一次发送数据报组建TCP首部时，需要通告对方当前的接收窗口大小，这时需要更新rcv_wnd，此时rcv_wnd的取值不能超过rcv_ssthresh的值。两者配合，达到一个滑动窗口大小缓慢增长的效果。
+     * rcv_ssthresh是当前的接收窗口大小的一个阀值，其初始值就置为rcv_wnd。
+     * 它跟rcv_wnd配合工作，当本地socket收到数据报，并满足一定条件时，
+     * 增长rcv_ssthresh的值，在下一次发送数据报组建TCP首部时，需要通告对方当前的接收窗口大小，这时需要更新rcv_wnd，
+     * 此时rcv_wnd的取值不能超过rcv_ssthresh的值。
+     * 两者配合，达到一个滑动窗口大小缓慢增长的效果。
      */
 	if (skb->len >= 128)
 		tcp_grow_window(sk, skb);
@@ -1319,6 +1387,10 @@ static u8 tcp_sacktag_one(struct sock *sk,
 /* Shift newly-SACKed bytes from this skb to the immediately previous
  * already-SACKed sk_buff. Mark the newly-SACKed bytes as such.
  */
+/*
+ * 对于部分数据被确认的skb，使用函数tcp_shifted_skb将此部分数据分离出来，尝试与之前已经被SACK确认的报文进行合并。
+ * 虽然只有部分数据被确认，也表明此报文完成了传输，使用其更新速率信息（见函数tcp_rate_skb_delivered)
+ */
 static bool tcp_shifted_skb(struct sock *sk, struct sk_buff *prev,
 			    struct sk_buff *skb,
 			    struct tcp_sacktag_state *state,
@@ -1600,6 +1672,7 @@ static struct sk_buff *tcp_sacktag_walk(struct sk_buff *skb, struct sock *sk,
 		 * so not even _safe variant of the loop is enough.
 		 */
 		if (in_sack <= 0) {
+		    // in_sack小于等于零，表明SACK没有完全包含当前SKB的数据，由函数tcp_shift_skb_data处理部分交叉的情况
 			tmp = tcp_shift_skb_data(sk, skb, state,
 						 start_seq, end_seq, dup_sack);
 			if (tmp) {
@@ -4474,6 +4547,8 @@ static inline bool tcp_paws_discard(const struct sock *sk,
 // 由rcv_wup的更新时机（发送ACK时的tcp_select_window）可知位于序号rcv_wup前面的数据都已确认，
 // 所以待检查数据包的结束序号至少要大于该值；
 // 同时开始序号要落在接收窗口内。
+// 即是结束序号不能位于rcv_wup之前，否则为序号重复的报文，但是开始序号可以位于rcv_wup之前，此时由部分报文重复。
+// 另一个条件是，报文的开始序号不能再接收窗口的右侧，否则报文完全落在接收窗口之外
 static inline bool tcp_sequence(const struct tcp_sock *tp, u32 seq, u32 end_seq)
 {
 	return	!before(end_seq, tp->rcv_wup) &&
@@ -5682,6 +5757,10 @@ static int tcp_prune_queue(struct sock *sk)
 
 	NET_INC_STATS(sock_net(sk), LINUX_MIB_PRUNECALLED);
 
+	/*
+	 * 1.如果已分配的接收缓存并未超出限定的接收缓存值，增加窗口的限制因素之一sk_rcvbuf的值
+	 * 2.但是TCP协议的整体缓存处于承压状态的话，将rcv_ssthresh限制在4倍的套接口通告MSS值之内
+	 */
 	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf)
 		tcp_clamp_window(sk);
 	else if (tcp_under_memory_pressure(sk))
@@ -5795,6 +5874,13 @@ static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
 	unsigned long rtt, delay;
 
 	    /* More than one full frame received... */
+	/*
+	 * 1.如果当前接收到的数据的序号减去窗口的左边界已经大于发送端的MSS值，并且新通告窗口不小于当前的通过窗口rcv_wnd
+	 * 即窗口右边界可向右移动大于MSS的空间，或者接收缓冲区中的数据达到接收低潮限度，
+	 * 2.快速模式
+	 * 3.被要求立即发送ACK
+	 * 说明发送ACK的时机已到。
+	 */
 	if (((tp->rcv_nxt - tp->rcv_wup) > inet_csk(sk)->icsk_ack.rcv_mss &&
 	     /* ... and right edge of window advances far enough.
 	      * (tcp_recvmsg() will send ACK otherwise).

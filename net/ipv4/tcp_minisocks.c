@@ -369,12 +369,23 @@ void tcp_openreq_init_rwin(struct request_sock *req,
 	u32 rcv_wnd;
 	int mss;
 
+	/*
+	 * 由函数tcp_mss_clamp可知，如果用户通过setsockopt选项TCP_MAXSEG指定了MSS，并且其值小于由路由函数dst_metric_advmss得到的值，使用用户指定的值；
+	 */
 	mss = tcp_mss_clamp(tp, dst_metric_advmss(dst));
 	window_clamp = READ_ONCE(tp->window_clamp);
 	/* Set this up on the first call only */
 	req->rsk_window_clamp = window_clamp ? : dst_metric(dst, RTAX_WINDOW);
 
 	/* limit the window selection if the user enforce a smaller rx buffer */
+	/*
+	 * 计算窗口钳制值rsk_window_clamp。
+	 * 如果用户通过setsockopt选项TCP_WINDOW_CLAMP设置了套接口的窗口钳制值，rsk_window_clamp使用用户的设置值，
+	 * 否则使用此TCP连接的路由表项中指定的值，
+	 * 如下的IP命令:$ ip route add 192.168.6.6 via 192.168.1.1 window 4096
+	 * 如果用户使用setsockopt选项SO_RCVBUF/SO_SNDBUFFORCE设置了接收缓存最大值，
+	 * 并且套接口的窗口钳制值rsk_window_clamp大于full_space或者其等于0，使用full_space作为窗口钳制值。
+	 */
 	if (sk_listener->sk_userlocks & SOCK_RCVBUF_LOCK &&
 	    (req->rsk_window_clamp > full_space || req->rsk_window_clamp == 0))
 		req->rsk_window_clamp = full_space;
@@ -383,6 +394,7 @@ void tcp_openreq_init_rwin(struct request_sock *req,
 	if (rcv_wnd == 0)
 		rcv_wnd = dst_metric(dst, RTAX_INITRWND);
 	else if (full_space < rcv_wnd * mss)
+	    //如果BPF系统指定了初始窗口值，并且full_space值小于初始窗口值与MSS的乘积，将full_space最终定义为乘积的结果值。
 		full_space = rcv_wnd * mss;
 
 	/* tcp_full_space because it is guaranteed to be the first packet */
@@ -452,6 +464,10 @@ static void smc_check_reset_syn_req(struct tcp_sock *oldtp,
  *
  * Actually, we could lots of memory writes here. tp of listening
  * socket contains all necessary default parameters.
+ */
+/*
+ * 在TCP三次握手完成之后，请求套接口结构inet_request_sock中保存的窗口相关信息都将赋值给新创建的子套接口。
+ * 如下函数tcp_create_openreq_child，其中如果支持窗口扩张，保存扩张系数，否则的话将子套接口中的扩张系数清零，并且要保证窗口钳制值不大于16bit的最大无符号数（65535）
  */
 struct sock *tcp_create_openreq_child(const struct sock *sk,
 				      struct request_sock *req,

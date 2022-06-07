@@ -162,6 +162,11 @@ dst_metric(const struct dst_entry *dst, const int metric)
 	return dst_metric_raw(dst, metric);
 }
 
+/*
+ * 确定TCP通告的最大分段值MSS。MSS可由路由METRIC的advmss属性取得，如下的IP命令配置advmss，如果路由中未指定（advmss等于0），取默认的MSS值。
+ * 对于IPv4而言，回调函数default_advmss为ipv4_default_advmss，
+ * 其由路由出口设备的MTU值或者路由METRIC的MTU属性值减去TCP标准头部长度和IP标准头部长度而得到。
+ */
 static inline u32
 dst_metric_advmss(const struct dst_entry *dst)
 {

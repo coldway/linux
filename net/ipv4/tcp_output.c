@@ -212,6 +212,13 @@ static inline void tcp_event_ack_sent(struct sock *sk, unsigned int pkts,
  * be a multiple of mss if possible. We assume here that mss >= 1.
  * This MUST be enforced by all callers.
  */
+/*
+ * 基础函数tcp_select_initial_window用于在TCP连接建立前选择初始的窗口值。
+ * 如下所示窗口值由space值开始推算，space初始化为第二个参数__space的值，其通常为套接口的当前最大接收缓存长度，如果其小于0，初始化为0。
+ * 内核将space值钳制在windown_clamp（初始为最大窗口值）之内，之后space值向下修正为最大分段长度mss的整数倍（调用者要保证mss的值至少大于等于1）。
+ * 如果用户要求对一些将TCP窗口值作为有符号数解释的系统进行兼容，即PROC文件tcp_workaround_signed_windows为真，将接收窗口值rcv_wnd限定在MAX_TCP_WINDOW之内，
+ * 反之，取space的值为窗口值。
+ */
 void tcp_select_initial_window(const struct sock *sk, int __space, __u32 mss,
 			       __u32 *rcv_wnd, __u32 *window_clamp,
 			       int wscale_ok, __u8 *rcv_wscale,
@@ -241,10 +248,23 @@ void tcp_select_initial_window(const struct sock *sk, int __space, __u32 mss,
 	else
 		(*rcv_wnd) = min_t(u32, space, U16_MAX);
 
+	/*
+	 * 如果有传入初始init_rcv_wnd值
+	 * 将rcv_wnd值限制在初始窗口值init_rcv_wnd与MSS乘积值以下。通常情况下初始接收窗口为0，用户可通过BPF或者路由系统指定其值
+	 * 可以查看tcp_output.c或者tcp_minisocks.c文件查看init_rcv_wnd值的来由
+	 */
 	if (init_rcv_wnd)
 		*rcv_wnd = min(*rcv_wnd, init_rcv_wnd * mss);
 
 	*rcv_wscale = 0;
+	/*
+	 * 支持窗口扩张系数
+	 * 确定窗口扩张系数的值，如果PROC文件tcp_rmem定义的接收缓存最大值（第三个值），或者rmem_max文件指定的最大内存值，
+	 * 其中之一大于space值将其调整为三者之中的最大值。
+	 * 其次，space值应确保小于窗口钳制值windown_clamp，
+	 * 最后，内核将space值分拆为接收窗口的16bit基础值和扩张系数值两个部分，
+	 * 基础值部分不能大于16bit的最大值，扩张系数不能大于系统定义的最大扩张系数TCP_MAX_WSCALE，拆分完成之后得到需要的扩张系数值rcv_wscale。
+	 */
 	if (wscale_ok) {
 		/* Set window scaling on max possible window */
 		space = max_t(u32, space, sock_net(sk)->ipv4.sysctl_tcp_rmem[2]);
@@ -254,6 +274,9 @@ void tcp_select_initial_window(const struct sock *sk, int __space, __u32 mss,
 				      0, TCP_MAX_WSCALE);
 	}
 	/* Set the clamp no higher than max representable value */
+	// 设置对外公布的最大的窗口值，但不大于之前的值
+	// 其不能大于接收窗口的最大基础值左移扩张系数的结果。初始的窗口钳制值可通过路由系统指定，或者通过setsockopt的选项TCP_WINDOW_CLAMP设定，
+	// 其值不能小于最小接收缓存值（SOCK_MIN_RCVBUF）的一半。
 	(*window_clamp) = min_t(__u32, U16_MAX << (*rcv_wscale), *window_clamp);
 }
 EXPORT_SYMBOL(tcp_select_initial_window);
@@ -262,6 +285,11 @@ EXPORT_SYMBOL(tcp_select_initial_window);
  * socket, and return result with RFC1323 scaling applied.  The return
  * value can be stuffed directly into th->window for an outgoing
  * frame.
+ */
+/*
+ * 返回的窗口值可用于赋值TCP头部的通告窗口window字段。
+ * 首先不能通告一个比当前可用接收窗口还要小的新窗口值，
+ * 否则，将新窗口值更新为当前的可用接收窗口值。
  */
 static u16 tcp_select_window(struct sock *sk)
 {
@@ -284,11 +312,19 @@ static u16 tcp_select_window(struct sock *sk)
 				      LINUX_MIB_TCPWANTZEROWINDOWADV);
 		new_win = ALIGN(cur_win, 1 << tp->rx_opt.rcv_wscale);
 	}
+	/*
+	 * 更新rcv_wnd接收窗口值，并且将等待接收的下一个数据的序号rcv_nxt保存到rcv_wup变量中，在计算当前窗口时需要此值
+	 */
 	tp->rcv_wnd = new_win;
 	tp->rcv_wup = tp->rcv_nxt;
 
 	/* Make sure we do not exceed the maximum possible
 	 * scaled window.
+	 */
+	/*
+	 * 1.只有在对端系统未发送接收窗口扩张系数选项，并且PROC文件tcp_workaround_signed_windows的值为1时，
+	 * 意味着要兼容一些将窗口值解释为16bit有符号数的系统，内核才将新窗口值限制在MAX_TCP_WINDOW（32767）之内。
+	 * 2.否则，将限制值提高到16bit无符号最大值（65535）左移窗口扩张系数位数的所得值。
 	 */
 	if (!tp->rx_opt.rcv_wscale &&
 	    sock_net(sk)->ipv4.sysctl_tcp_workaround_signed_windows)
@@ -300,6 +336,7 @@ static u16 tcp_select_window(struct sock *sk)
 	new_win >>= tp->rx_opt.rcv_wscale;
 
 	/* If we advertise zero window, disable fast path. */
+	/* 如果新通告的窗口值为0，关闭TCP的快速路径接收功能 */
 	if (new_win == 0) {
 		tp->pred_flags = 0;
 		if (old_win)
@@ -661,6 +698,10 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		opts->tsecr = tp->rx_opt.ts_recent;
 		remaining -= TCPOLEN_TSTAMP_ALIGNED;
 	}
+	/*
+	 * 对于TCP客户端，在发送SYN请求报文时由函数tcp_syn_options添加选项信息
+	 * 如果PROC文件/proc/sys/net/ipv4/tcp_window_scaling内容为真，添加窗口扩张选项。
+	 */
 	if (likely(sock_net(sk)->ipv4.sysctl_tcp_window_scaling)) {
 		opts->ws = tp->rx_opt.rcv_wscale;
 		opts->options |= OPTION_WSCALE;
@@ -732,6 +773,10 @@ static unsigned int tcp_synack_options(const struct sock *sk,
 	opts->mss = mss;
 	remaining -= TCPOLEN_MSS_ALIGNED;
 
+	/*
+	 * 如果客户端在SYN请求报文中携带了TCPOPT_WINDOW选项，并且本地服务端支持窗口扩张（PROC文件tcp_window_scaling）
+	 * 在回复SYN+ACK报文时，增加服务端的TCP窗口扩张选项
+	 */
 	if (likely(ireq->wscale_ok)) {
 		opts->ws = ireq->rcv_wscale;
 		opts->options |= OPTION_WSCALE;
@@ -1236,6 +1281,11 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
     /* TCP首部调整完毕，开始构建TCP首部选项 */
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
 	skb_shinfo(skb)->gso_type = sk->sk_gso_type;
+	/*
+	 * 调用tcp_select_window将套接口当前的接收窗口大小通告于对端系统。
+	 * 对于SYN和SYN+ACK数据包而言，其通告的窗口值不支持TCP扩张选项，直接通告rcv_wnd的值。
+	 * 除此之外的数据包，使用函数tcp_select_window获得
+	 */
 	if (likely(!(tcb->tcp_flags & TCPHDR_SYN))) {
 		th->window      = htons(tcp_select_window(sk));
 		tcp_ecn_send(sk, skb, th, tcp_header_size);
@@ -2957,6 +3007,9 @@ void tcp_push_one(struct sock *sk, unsigned int mss_now)
  * Note, we don't "adjust" for TIMESTAMP or SACK option bytes.
  * Regular options like TIMESTAMP are taken into account.
  */
+/*
+ * 选择新的通告接收窗口大小
+ */
 u32 __tcp_select_window(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -2968,13 +3021,14 @@ u32 __tcp_select_window(struct sock *sk)
 	 * fluctuations.  --SAW  1998/11/1
 	 */
 	int mss = icsk->icsk_ack.rcv_mss;
-	int free_space = tcp_space(sk);
-	int allowed_space = tcp_full_space(sk);
+	int free_space = tcp_space(sk);         // 空闲缓存空间, 等于最大接收空间减去已使用空间的结果值可容纳的单纯数据的量
+	int allowed_space = tcp_full_space(sk); // 可允许空间, 表示套接口最大接收空间可容纳的单纯数据量
 	int full_space, window;
 
 	if (sk_is_mptcp(sk))
 		mptcp_space(sk, &free_space, &allowed_space);
 
+	// 缓存空间为最大满负荷空间full_space，其等于allowed_space与套接口对外公布的最大的窗口两者之中的较小值
 	full_space = min_t(int, tp->window_clamp, allowed_space);
 
 	if (unlikely(mss > full_space)) {
@@ -2982,9 +3036,11 @@ u32 __tcp_select_window(struct sock *sk)
 		if (mss <= 0)
 			return 0;
 	}
+	// 空闲空间free_space小于最大满负荷空间full_space的一半，表明空闲空间将要变得紧急，尝试降低窗口值
 	if (free_space < (full_space >> 1)) {
 		icsk->icsk_ack.quick = 0;
 
+		// TCP协议的缓存空间处于承压状态，将慢启动窗口阈值rcv_ssthresh控制在4倍的通告MSS值之内
 		if (tcp_under_memory_pressure(sk))
 			tp->rcv_ssthresh = min(tp->rcv_ssthresh,
 					       4U * tp->advmss);
@@ -2992,6 +3048,7 @@ u32 __tcp_select_window(struct sock *sk)
 		/* free_space might become our new window, make sure we don't
 		 * increase it due to wscale.
 		 */
+		// 将freee_space的值向下修正到最小扩张空间的整数倍，避免因扩张系数导致不必要的窗口增长
 		free_space = round_down(free_space, 1 << tp->rx_opt.rcv_wscale);
 
 		/* if free space is less than mss estimate, or is below 1/16th
@@ -3001,22 +3058,34 @@ u32 __tcp_select_window(struct sock *sk)
 		 * With large window, mss test triggers way too late in order
 		 * to announce zero window in time before rmem limit kicks in.
 		 */
+		// free_space空间已恶化到小于估算MSS的值，或者小于最大允许接收空间的1/16时，表明空闲空间已非常紧急，直接返回0窗口
+		// 1. 为避免糊涂窗口综合征（Silly Window Syndrome），不要通告小窗口值。
+		// 而且如果不通告零窗口，发送端将继续发送报文，最终导致在TCP接收路径中遭遇空间不足，
+		// 此时tcp_clamp_window函数将增加接收缓存sk_rcvbuf的长度，直至到最大缓存长度（PROC文件tcp_rmem的第三个值），
+		// 此后进来的数据包将因内存限值而被丢弃。
+		// 2. 如果通告窗口较大，意味着对端可发送大量数据，将很快触发空闲空间小于最大允许空间的1/16的条件，空闲空间小于MSS值的条件有一定的滞后
 		if (free_space < (allowed_space >> 4) || free_space < mss)
 			return 0;
 	}
 
+	// free_space的值限制在rcv_ssthresh阈值之内。一般情况是缓存空间处于承压状态
 	if (free_space > tp->rcv_ssthresh)
 		free_space = tp->rcv_ssthresh;
 
 	/* Don't do rounding if we are using window scaling, since the
 	 * scaled window will not line up with the MSS boundary anyway.
 	 */
+	// 开启了窗口扩张选项
 	if (tp->rx_opt.rcv_wscale) {
 		window = free_space;
 
 		/* Advertise enough space so that it won't get scaled away.
 		 * Import case: prevent zero window announcement if
 		 * 1<<rcv_wscale > mss.
+		 */
+		/*
+		 * free_space换算为2的扩张系数次幂的整数倍（即对齐到1 << tp->rx_opt.rcv_wscale），结果值作为通告的窗口，
+		 * 此处不将窗口值修正为MSS的整数倍，因为即使修正，最终扩张换算的窗口值也可能不再是MSS整数倍
 		 */
 		window = ALIGN(window, (1 << tp->rx_opt.rcv_wscale));
 	} else {
@@ -3029,13 +3098,26 @@ u32 __tcp_select_window(struct sock *sk)
 		 * We also don't do any window rounding when the free space
 		 * is too small.
 		 */
+		/*
+		 * 1. 当前的通告窗口rcv_wnd再增加MSS的量也不超过空闲空间的值，表明空闲量至少比窗口大于一个MSS值（未通告空间大于MSS），即可增大窗口值，
+		 * 此处要求窗口值为mss的整数倍，将free_space向下修正到MSS的整数倍作为新窗口值；
+		 * 2. 当前通告窗口大于空闲空间值，表明空闲空间不足而窗口过大，同样将free_space向下修正到MSS的整数倍作为新的窗口值。
+		 *
+		 */
 		if (window <= free_space - mss || window > free_space)
 			window = rounddown(free_space, mss);
 		else if (mss == full_space &&
 			 free_space > window + (full_space >> 1))
+		    /*
+		     * 当前通告窗口值增加MSS的量之后大于free_space空闲空间的值（未通告空间小于MSS），并且满负荷空间full_space很小仅等于MSS的值，
+		     * 而空闲空间free_space大于窗口值加上满负荷空间的一半（也即MSS的1/2）的结果值，
+		     * 表明未通告空间大于MSS的1/2，将新窗口增加为free_space的值.
+		     * 此处不能修正到MSS的整数倍，因为增加值太小（不到一个MSS）
+		     */
 			window = free_space;
 	}
 
+    // 以上条件都不满足，继续通告之前的窗口值。
 	return window;
 }
 
@@ -3612,6 +3694,7 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	th->ack_seq = htonl(tcp_rsk(req)->rcv_nxt); // 确认号
 
 	/* RFC1323: The window in SYN & SYN/ACK segments is never scaled. */
+	/* 此报文的TCP头部窗口字段window，保存的是未进行扩张处理的窗口值，SYN和SYN+ACK两种报文的窗口都不进行扩张 */
 	th->window = htons(min(req->rsk_rcv_wnd, 65535U)); // 窗口大小
 	tcp_options_write((__be32 *)(th + 1), NULL, &opts);  // 选项
 	th->doff = (tcp_header_size >> 2); // 首部长度
@@ -3652,6 +3735,13 @@ static void tcp_ca_dst_init(struct sock *sk, const struct dst_entry *dst)
 }
 
 /* Do all connect socket setups that can be done AF independent. */
+/*
+ * TCP客户端在tcp_connect_init函数中初始化接收窗口相关参数，参数意义大体上与服务端类似。
+ * PROC文件tcp_window_scaling决定是否启用TCP的窗口扩张系数选项，
+ * 内核默认是启用状态，反之未启用的话tcp_select_initial_window函数返回的扩张系数rcv_wscale值将为0。
+ * 另外，如果此套接口接收过timestamp选项，ts_recent_stamp记录了接收的时间戳，需要将通告MSS（advmss）的值减去TCP选项的长度值，才是真正的数据长度。
+ * TCP选项的长度由TCP头部总长度减去TCP基础头部长度（20字节）得到。
+ */
 static void tcp_connect_init(struct sock *sk)
 {
 	const struct dst_entry *dst = __sk_dst_get(sk);

@@ -741,6 +741,11 @@ static inline u32 tcp_min_rtt(const struct tcp_sock *tp)
  * Rcv_nxt can be after the window if our peer push more data
  * than the offered window.
  */
+ /*
+  * TCP接收窗口的右边界（最大序号）等于上一次通告的接收窗口值rcv_wnd，与通告之时窗口的左边界rcv_wup之和，
+  * 使用窗口的右边界序号减去当前接收到数据的最后序号值，得到当前剩余的可用接收窗口。
+  * 当然，如果对端不顾窗口大小而发送了大量的数据将导致rcv_nxt超出窗口右边界，导致可用接收窗口为负数，限定为0。
+  */
 static inline u32 tcp_receive_window(const struct tcp_sock *tp)
 {
 	s32 win = tp->rcv_wup + tp->rcv_wnd - tp->rcv_nxt;
@@ -1444,6 +1449,13 @@ void tcp_select_initial_window(const struct sock *sk, int __space,
 			       __u32 *window_clamp, int wscale_ok,
 			       __u8 *rcv_wscale, __u32 init_rcv_wnd);
 
+/*
+ * 关于相关结构而非数据所占用的内存开销，内核使用PROC文件tcp_adv_win_scale控制其比例，
+ * 如果tcp_adv_win_scale小于等于0，开销为2^tcp_adv_win_scale次幂分之一；
+ * 如果大于零，结果翻转，开销为（1-(1/(2^-tcp_adv_win_scale))）分之一，
+ * 可见，tcp_adv_win_scale的值越小开销越大。内核默认值为1，开销为1/2，表明在套接口接收缓存中，数据与表示数据的相关结构各占一半缓存。
+ * tcp_adv_win_scale的合法取值范围为[-31, 31]。
+ */
 static inline int tcp_win_from_space(const struct sock *sk, int space)
 {
 	int tcp_adv_win_scale = sock_net(sk)->ipv4.sysctl_tcp_adv_win_scale;

@@ -81,9 +81,16 @@ void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_skb_cb *scb = TCP_SKB_CB(skb);
 
+	// delivered_mstamp为空，表明此报文发送时没有记录时间戳，不进行处理
 	if (!scb->tx.delivered_mstamp)
 		return;
 
+	/*
+	 * 对于确认多个skb的ACK报文（Stretched-Acks），此函数将被调用多次（每个确认报文调用一次），
+	 * 这里使用这些确认报文中最近发送的报文的时间信息，即tx.delivered时间较大的报文，使用其信息生成速率采样rate_sample。
+	 * 并且，使用此报文的时间戳，更新套接口first_tx_mstamp时间戳变量，开始新的发送速率采样窗口。
+	 * 随后，计算此时结束的上一个发送速率采样阶段的长度，即最近确认的报文的发送时间戳，减去最早发送的报文的时间戳（采样周期的开始时间,得到发送阶段的时长。
+	 */
 	if (!rs->prior_delivered ||
 	    after(scb->tx.delivered, rs->prior_delivered)) {
 		rs->prior_delivered  = scb->tx.delivered;
@@ -101,6 +108,9 @@ void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
 	/* Mark off the skb delivered once it's sacked to avoid being
 	 * used again when it's cumulatively acked. For acked packets
 	 * we don't need to reset since it'll be freed soon.
+	 */
+	/*
+	 * 报文被SACK所确认，清空其tx.delivered_mstamp时间戳。反之，在之后接收到ACK确认时，再次使用此报文信息计算速率
 	 */
 	if (scb->sacked & TCPCB_SACKED_ACKED)
 		scb->tx.delivered_mstamp = 0;

@@ -18,22 +18,26 @@ const struct tcphdr *nf_reject_ip_tcphdr_get(struct sk_buff *oldskb,
 	const struct tcphdr *oth;
 
 	/* IP header checks: fragment. */
+    /* 判断是否是分片包 */
 	if (ip_hdr(oldskb)->frag_off & htons(IP_OFFSET))
 		return NULL;
 
 	if (ip_hdr(oldskb)->protocol != IPPROTO_TCP)
 		return NULL;
 
+    /* 得到TCP头部指针 */
 	oth = skb_header_pointer(oldskb, ip_hdrlen(oldskb),
 				 sizeof(struct tcphdr), _oth);
 	if (oth == NULL)
 		return NULL;
 
 	/* No RST for RST. */
+    /* 当期收到的包就是RST包，就不用再发送RST包了 */
 	if (oth->rst)
 		return NULL;
 
 	/* Check checksum */
+    /* 检查数据包的校验和是否正确 */
 	if (nf_ip_checksum(oldskb, hook, ip_hdrlen(oldskb), IPPROTO_TCP))
 		return NULL;
 

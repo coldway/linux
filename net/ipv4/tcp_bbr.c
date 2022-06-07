@@ -190,7 +190,9 @@ static const u32 bbr_full_bw_cnt = 3;
 /* "long-term" ("LT") bandwidth estimator parameters... */
 /* The minimum number of rounds in an LT bw sampling interval: */
 static const u32 bbr_lt_intvl_min_rtts = 4;
-/* If lost/delivered ratio > 20%, interval is "lossy" and we may be policed: */
+/* If lost/delivered ratio > 20%, interval is "lossy" and we may be policed:
+ * 论文中丢包率大于20%会有暴跌，就是这里带来的
+ * */
 static const u32 bbr_lt_loss_thresh = 50;
 /* If 2 intervals have a bw ratio <= 1/8, their bw is "consistent": */
 static const u32 bbr_lt_bw_ratio = BBR_UNIT / 8;
@@ -331,7 +333,9 @@ static u32 bbr_tso_segs_goal(struct sock *sk)
 	return min(segs, 0x7FU);
 }
 
-/* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT */
+/* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT
+ * 保存上次使用的拥塞窗口
+ */
 static void bbr_save_cwnd(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -343,6 +347,7 @@ static void bbr_save_cwnd(struct sock *sk)
 		bbr->prior_cwnd = max(bbr->prior_cwnd, tp->snd_cwnd);
 }
 
+/* 拥塞窗口事件触发：如果在探测阶段则设置pacing rate */
 static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -484,7 +489,8 @@ static u32 bbr_ack_aggregation_cwnd(struct sock *sk)
 	return aggr_cwnd;
 }
 
-/* An optimization in BBR to reduce losses: On the first round of recovery, we
+/* 保存窗口，方便从PROBE_RTT进入时恢复
+ * An optimization in BBR to reduce losses: On the first round of recovery, we
  * follow the packet conservation principle: send P packets per P packets acked.
  * After that, we slow-start and send at most 2*P packets per P packets acked.
  * After recovery finishes, or upon undo, we restore the cwnd we had when
@@ -541,6 +547,9 @@ static void bbr_set_cwnd(struct sock *sk, const struct rate_sample *rs,
 	if (!acked)
 		goto done;  /* no packet fully ACKed; just apply caps */
 
+    // 第一次进入recovery状态时，返回true，此时cwnd=tcp_packets_in_flight(tp) + acked，因此这时候主要还是
+    // 考虑链路上的数据包守恒，ack多少个数据包就发送多少个数据包，相当于保持cwnd不变
+    // 退出recovery或loss状态时，cwnd=进入recovery或loss状态时的cwnd
 	if (bbr_set_cwnd_to_recover_or_restore(sk, rs, acked, &cwnd))
 		goto done;
 
@@ -565,6 +574,12 @@ done:
 		tp->snd_cwnd = min(tp->snd_cwnd, bbr_cwnd_min_target);
 }
 
+/*
+    利用增益系数数组pacing_gain[5/4, 3/4, 1, 1, 1, 1, 1, 1]探测带宽
+    如果是稳定阶段,pacing_gain=1,时长超过min_rtt_us就进入下一轮
+    如果是激进阶段,pacing_gain>1,必须时间够了，且有丢包或inflight>目标窗口才进入下一轮
+    如果是排空阶段,pacing_gain<1,时间够了，或者inflight<=目标窗口就进入下一轮
+*/
 /* End cycle phase if it's time and/or we hit the phase's in-flight target. */
 static bool bbr_is_next_cycle_phase(struct sock *sk,
 				    const struct rate_sample *rs)
@@ -579,6 +594,11 @@ static bool bbr_is_next_cycle_phase(struct sock *sk,
 	/* The pacing_gain of 1.0 paces at the estimated bw to try to fully
 	 * use the pipe without increasing the queue.
 	 */
+	/*
+	 * 如果delivered_mstamp-cycle_mstamp>min_rtt_us，
+	 * 即这一轮带宽探测时长够了.
+	 * 标记is_full_length=true，否则is_full_length=false
+	 */
 	if (bbr->pacing_gain == BBR_UNIT)
 		return is_full_length;		/* just use wall clock time */
 
@@ -590,6 +610,10 @@ static bool bbr_is_next_cycle_phase(struct sock *sk,
 	 * small (e.g. on a LAN). We do not persist if packets are lost, since
 	 * a path with small buffers may not hold that much.
 	 */
+    /*
+     * 如果处于探测更大带宽的周期(pacing_gain=5/4)
+     * 如果没有丢包，尝试一直处在该周期直到窗口增加到目标窗口(pacing_gain*BDP)
+     */
 	if (bbr->pacing_gain > BBR_UNIT)
 		return is_full_length &&
 			(rs->losses ||  /* perhaps pacing_gain*BDP won't fit */
@@ -599,6 +623,10 @@ static bool bbr_is_next_cycle_phase(struct sock *sk,
 	 * probing didn't find more bw. If inflight falls to match BDP then we
 	 * estimate queue is drained; persisting would underutilize the pipe.
 	 */
+	/*
+	 * 如果处于排空队列周期(pacing_gain=3/4),探测时长够了或者
+	 * inflight小于目标窗口可以提前退出这个周期
+     */
 	return is_full_length ||
 		inflight <= bbr_inflight(sk, bw, BBR_UNIT);
 }
@@ -638,7 +666,7 @@ static void bbr_reset_probe_bw_mode(struct sock *sk)
 	bbr_advance_cycle_phase(sk);	/* flip to next phase of gain cycle */
 }
 
-/*PROBE_RTT结束后的状态重置*/
+/* PROBE_RTT结束后的状态重置 */
 static void bbr_reset_mode(struct sock *sk)
 {
 	if (!bbr_full_bw_reached(sk))
@@ -711,6 +739,11 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 	u64 bw;
 	u32 t;
 
+	/*
+	 * 如果已经进入longterm状态
+	 * 如果处于bbr带宽探测阶段，且进入新周期，longterm时间已经超过了48个周期，就重置lt采样，切换到bbr带宽探测阶段
+	 * 退出longterm状态
+     */
 	if (bbr->lt_use_bw) {	/* already using long-term rate, lt_bw? */
 		if (bbr->mode == BBR_PROBE_BW && bbr->round_start &&
 		    ++bbr->lt_rtt_cnt >= bbr_lt_bw_max_rtts) {
@@ -720,6 +753,11 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 		return;
 	}
 
+    /*
+     * 如果lt_is_sampling==fasle,即没有采样
+     * 如果rs->losses==0,即没有丢包，则退出long-term检测
+     * 否则开始一个新的long-term采样．更新采样标签
+     */
 	/* Wait for the first loss before sampling, to let the policer exhaust
 	 * its tokens and estimate the steady-state rate allowed by the policer.
 	 * Starting samples earlier includes bursts that over-estimate the bw.
@@ -732,11 +770,13 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 	}
 
 	/* To avoid underestimates, reset sampling if we run out of data. */
+    /* 如果是应用层数据限制，就重新采样 */
 	if (rs->is_app_limited) {
 		bbr_reset_lt_bw_sampling(sk);
 		return;
 	}
 
+    /* 采样周期数需要在(4,16)之间 */
 	if (bbr->round_start)
 		bbr->lt_rtt_cnt++;	/* count round trips in this interval */
 	if (bbr->lt_rtt_cnt < bbr_lt_intvl_min_rtts)
@@ -746,6 +786,7 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 		return;
 	}
 
+    /* 如果rs->losses==0,即没有丢包，则退出long-term检测 */
 	/* End sampling interval when a packet is lost, so we estimate the
 	 * policer tokens were exhausted. Stopping the sampling before the
 	 * tokens are exhausted under-estimates the policed rate.
@@ -804,6 +845,10 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	}
 
     // 令牌桶监管
+    /*
+     * long-term处理占了bbr代码很大一部分． 用来处理traffic policers主动丢包（如路由器交换机会在某些场景下，随即丢包）．
+     * 如注释中说到的，当看到两次连续采样间隔，吞吐量不变并有大量丢包，就认为有traffic policers主动丢包，进入long-term状态，避免进一步大量丢包
+     */
 	bbr_lt_bw_sampling(sk, rs);
 
 	/* Divide delivered by the interval to find a (lower bound) bottleneck
@@ -924,6 +969,11 @@ static void bbr_update_ack_aggregation(struct sock *sk,
  * 第二轮填满接收窗口
  * 第三轮返回高的传输速率
  */
+/*
+	检测慢启动阶段带宽是否已经到了最大值．
+	如果连续三次检查到带宽增长速度小于bbr_full_bw_thresh(25%),
+	就认为pipe满了,带宽到了最大值
+*/
 static void bbr_check_full_bw_reached(struct sock *sk,
 				      const struct rate_sample *rs)
 {
@@ -959,6 +1009,9 @@ static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 		tcp_sk(sk)->snd_ssthresh =
 				bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT); // 修改发送阈值。其实也就是当前的BDP
 	}	/* fall through to check if in-flight is already small: */
+    /*
+     * 如果排空阶段inflight<=target，即队列已经清空，切换到带宽探测状态机
+     */
 	if (bbr->mode == BBR_DRAIN &&
 	    bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tcp_sk(sk))) <=
 	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT)) // drain模式且inflight小于当前最大BDP管道
@@ -1008,7 +1061,10 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 	bool filter_expired;
 
 	/* Track min RTT seen in the min_rtt_win_sec filter window: */
-	/* 判断是否连续10s没有更新最小rtt */
+    /*
+     * 最小rtt有效时间为bbr_min_rtt_win_sec*HZ, 即10s, 判断是否连续10s没有更新最小rtt
+     * 如果有效时间过了或者新采的rtt更小，更新最小rtt大小和最小rtt发生的时间
+     */
 	filter_expired = after(tcp_jiffies32,
 			       bbr->min_rtt_stamp + bbr_min_rtt_win_sec * HZ);
 	if (rs->rtt_us >= 0 &&
@@ -1018,6 +1074,12 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 		bbr->min_rtt_stamp = tcp_jiffies32;
 	}
 
+    /*
+     * 如果开启了rtt探测功能，且最小rtt有效时间过了(也可以理解为rtt探测周期到了)，
+     * 且idle_restart==0（不是从空闲状态重启的），且当前不处在rtt探测状态BBR_PROBE_RTT：
+     * 设置状态机为BBR_PROBE_RTT，保留之前窗口用来恢复，
+     * rtt探测结束时间标记为无效值0（后面会设置具体有效值）
+    */
 	if (bbr_probe_rtt_mode_ms > 0 && filter_expired &&
 	    !bbr->idle_restart && bbr->mode != BBR_PROBE_RTT) { // 连续10s没有更新最小rtt且不为rtt mode
 		bbr->mode = BBR_PROBE_RTT;  /* dip, drain queue */ // 进入探测rtt mode
@@ -1025,6 +1087,21 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 		bbr->probe_rtt_done_stamp = 0;
 	}
 
+    /*
+     * 如果处于rtt探测状态，更新限制
+     *      如果probe_rtt_done_stamp=0（结束标记无效），且网络中的包少于bbr_cwnd_min_target
+     *          开始采样：
+     *          更新rtt探测结束时间,设置probe_rtt_round_done=0(标记rtt探测还没有开始做过),更新下一个rtt的delivered
+     *      否则如果probe_rtt_done_stamp!=0（结束标记有效）
+     *          如果round_start=1
+     *              标记probe_rtt_round_done=1（rtt探测已经开始做了）
+     *          如果rtt探测已经做过了，
+     *              进行探测结束检查
+     *                  探测时长到了且结束标记有效（这里是bbr_check_probe_rtt_done的内容）
+     *                      更新最小rtt计算的时间（用于判断有没有过期，以重新进入rtt探测周期）
+     *                      标记恢复窗口
+     *                      重置模型
+    */
 	if (bbr->mode == BBR_PROBE_RTT) { // 如果是probe_rtt状态
 		/* Ignore low rate samples during this mode. */
 		tp->app_limited =

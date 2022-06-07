@@ -169,7 +169,12 @@ struct tcp_sock {
 				 */
  	u32	rcv_nxt;	/* What we want to receive next 	*/ // 下一个想要收到的第一个数据的字节编号
 	u32	copied_seq;	/* Head of yet unread data		*/     // 没还有读出的数据的头
-	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/ // rcv_nxt在最后一个窗口更新时的值
+	/*
+	 * 接收窗口的左边界，之前的数据均已经回复确认ack
+	 * rcv_wup至rcv_nxt之间的数据尚未发送ack确认
+	 * 回复数据时调用tcp_select_window，用rcv_nxt更新rcv_wup
+	 */
+	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
  	u32	snd_nxt;	/* Next sequence we send		*/     // 下一个发送的第一个字节编号
 	u32	segs_out;	/* RFC4898 tcpEStatsPerfSegsOut
 				 * The total number of segments sent.
@@ -302,7 +307,18 @@ struct tcp_sock {
 	u32	rate_delivered;    /* saved rate sample: packets delivered */
 	u32	rate_interval_us;  /* saved rate sample: time elapsed */
 
- 	u32	rcv_wnd;	/* Current receiver window		*/ // 当前接收窗口
+	/*
+	 * 当前接收窗口
+	 * 回复数据时调用tcp_select_window，用__tcp_select_window计算得到的最新
+	 * new_win更新rcv_wnd
+	 *  -------------------------|--------------------------|------------------|-------------------
+	 *  已经接收已经回复ack的数据    |  已经接收尚未回复ack的数据  | 允许接收的数据空间  |不允许接收的数据空间
+	 *  -------------------------|--------------------------|------------------|-------------------
+	 *  					     |rcv_wup					|rcv_nxt		   |
+	 *  					     |<-----------------rcv_wnd------------------->|
+	 *
+	 */
+ 	u32	rcv_wnd;	/* Current receiver window		*/
 	u32	write_seq;	/* Tail(+1) of data held in tcp send buffer */ // tcp发送buf中数据的尾部
 	u32	notsent_lowat;	/* TCP_NOTSENT_LOWAT */
 	u32	pushed_seq;	/* Last pushed seq, required to talk to windows */ // push序列

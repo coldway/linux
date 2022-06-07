@@ -1647,6 +1647,12 @@ static void tcp_cleanup_rbuf(struct sock *sk, int copied)
 	 * Even if window raised up to infinity, do not send window open ACK
 	 * in states, where we will not receive more. It is useless.
 	 */
+	/*
+	 * 如果用户层由接收队列拷贝走了数据（copied大于0），并且当前接收窗口的2倍值小于等于对外公布的最大的窗口值，
+	 * 内核检查一下可能的新窗口值是否大于等于当前接收窗口的2倍值，如果成立通告新的接收窗口值。
+	 * 注意，由于__tcp_select_window函数的执行需要较多的CPU指令周期，在调用之前，内核提前判断了对外公布的最大的窗口值，避免对__tcp_select_window函数的无谓调用。
+	 * 只有在用户读取了一定量的数据，致使可用新窗口足够大时，才会通告新的窗口值。通告由ACK报文发送。
+	 */
 	if (copied > 0 && !time_to_ack && !(sk->sk_shutdown & RCV_SHUTDOWN)) {
 		__u32 rcv_window_now = tcp_receive_window(tp);
 
