@@ -1311,8 +1311,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	icsk->icsk_af_ops->send_check(sk, skb);
 
     /*
-     * 如果发送出去的段有ACK标志，则需要通知延时确认模块，递减
-     * 快速发送ACK段的数量，同时停止延时确认定时器。
+     * 如果发送出去的段有ACK标志，则需要
+     * 1.通知延时确认模块
+     * 2.递减快速发送ACK段的数量
+     * 3.同时停止延时确认定时器
      */
 	if (likely(tcb->tcp_flags & TCPHDR_ACK))
 		tcp_event_ack_sent(sk, tcp_skb_pcount(skb), rcv_nxt);
@@ -2594,7 +2596,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
     // sent_pkts将记录本次调用发送的数据段数
 	sent_pkts = 0;
 
-    /* 更改tp->tcp_mstamp为当前时间的us表示 */
+    /* 更改tp->tcp_mstamp、tp->tcp_clock_cache为当前时间的us表示 */
 	tcp_mstamp_refresh(tp);
 	if (!push_one) {
 		/* Do MTU probing. 探测mtu */
@@ -3890,7 +3892,7 @@ static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 	tcp_connect_queue_skb(sk, syn_data);
 	if (syn_data->len)
 		tcp_chrono_start(sk, TCP_CHRONO_BUSY);
-
+    /* 发送数据，如果返回非0，表示本次发送失败（如qdisc队列已满等）*/
 	err = tcp_transmit_skb(sk, syn_data, 1, sk->sk_allocation);
 
 	syn->skb_mstamp_ns = syn_data->skb_mstamp_ns;

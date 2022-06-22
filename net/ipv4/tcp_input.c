@@ -509,7 +509,7 @@ static void tcp_init_buffer_space(struct sock *sk)
 
 	maxwin = tcp_full_space(sk);
 
-	// 如果当前的窗口钳制值window_clamp大于等于sk_rcvbuf对应的最大窗口值maxwin，将其限制在maxwin。
+	// 如果当前的窗口钳制值window_clamp大于等 于sk_rcvbuf对应的最大窗口值maxwin，将其限制在maxwin。
 	if (tp->window_clamp >= maxwin) {
 		tp->window_clamp = maxwin;
 
@@ -4030,7 +4030,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	}
 
 	prior_fack = tcp_is_sack(tp) ? tcp_highest_sack_seq(tp) : tp->snd_una;
-    // 计算还在传输的数据段的字节数，下面会说手这个函数
+    // 计算还在传输的数据段的字节数
 	rs.prior_in_flight = tcp_packets_in_flight(tp);
 
 	/* ts_recent update must be made after we are sure that the packet

@@ -818,6 +818,9 @@ static void bbr_lt_bw_sampling(struct sock *sk, const struct rate_sample *rs)
 
 /* Estimate the bandwidth based on how fast packets are delivered */
 /*
+ * 仔细看了代码。
+ *      *最大带宽最多只能坚持 bbr_bw_rtts（10） 个rtt，就会被更新。
+ *      *如果有超过最大带宽的，直接就是重置，全部更新为最大带宽，
  * 估算实际的带宽
     1、更新RTT周期
     2、计算带宽=确认的字节数*BW_UNIT/采样时间
@@ -893,7 +896,7 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
  * Max filter is an approximate sliding window of 5-10 (packet timed) round
  * trips.
  *
- * 这用于提供额外的飞行中数据以在 ACK 间静默期间继续发送
+ * 这用于提供额外的飞行中数据以在ACK聚合期间继续发送
  *
  * 确认聚合的程度被估计为超出预期的额外数据
  *
@@ -904,6 +907,10 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
  * 最大 extra_acked 由 cwnd 和 bw * bbr_extra_acked_max_us (100 ms) 限制。
  * 最大过滤器是 5-10（分组定时）往返的近似滑动窗口。
  *
+ */
+/*
+ * 每五轮（由bbr_update_bw）获取一个最大值。但是，是从每轮计算中选的。每轮都是叠加状态计算。
+ * 五轮后重置idx。后面的计算也是叠加。直到收到比预期少的ACK或者超过阈值（bbr_ack_epoch_acked_reset_thresh），其实就是为了重置数据，叠加情况下每个变量的数据量太大了，容易溢出，计算就没有意义了
  */
 static void bbr_update_ack_aggregation(struct sock *sk,
 				       const struct rate_sample *rs)
@@ -993,7 +1000,7 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 	}
 	// bw未增加，full_bw_cnt++
 	++bbr->full_bw_cnt;
-	// 三次带宽(bw)没有增加。记录需要排空管道
+	// 三次带宽(bw)没有增加。标记需要排空管道
 	bbr->full_bw_reached = bbr->full_bw_cnt >= bbr_full_bw_cnt;
 }
 
@@ -1157,7 +1164,7 @@ static void bbr_update_gains(struct sock *sk)
 static void bbr_update_model(struct sock *sk, const struct rate_sample *rs)
 {
 	bbr_update_bw(sk, rs);             // 根据发送数据包的速度估计带宽
-	bbr_update_ack_aggregation(sk, rs);// ack静默期间，提供额外的inflight数据
+	bbr_update_ack_aggregation(sk, rs);// ack聚合期间，提供额外的inflight数据
 	bbr_update_cycle_phase(sk, rs);    // 增益循环
 	bbr_check_full_bw_reached(sk, rs); // 检查管道是否已满
 	bbr_check_drain(sk, rs);    // 如果管道可能已满，则排空队列，然后进入稳定状态
@@ -1216,6 +1223,7 @@ static void bbr_init(struct sock *sk)
 	bbr->extra_acked[0] = 0;
 	bbr->extra_acked[1] = 0;
 
+	// 标明使用内置pacing功能
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
 

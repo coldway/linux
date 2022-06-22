@@ -101,6 +101,7 @@ void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
 		/* Record send time of most recently ACKed packet: */
 		tp->first_tx_mstamp  = tcp_skb_timestamp_us(skb);
 		/* Find the duration of the "send phase" of this window: */
+        // delivered 与prior_delivered 发送时间差
 		rs->interval_us = tcp_stamp_us_delta(tp->first_tx_mstamp,
 						     scb->tx.first_tx_mstamp);
 
@@ -149,7 +150,7 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 		rs->interval_us = -1;
 		return;
 	}
-	rs->delivered   = tp->delivered - rs->prior_delivered; // 保存的本次采样周期内确认的报文数量
+	rs->delivered = tp->delivered - rs->prior_delivered; // 保存的本次采样周期内确认的报文数量
 
 	/* Model sending data and receiving ACKs as separate pipeline phases
 	 * for a window. Usually the ACK phase is longer, but with ACK

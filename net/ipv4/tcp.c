@@ -1192,7 +1192,7 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	return err;
 }
 
-/* 由tcp_sendmsg()调用
+/* 由 tcp_sendmsg()调用
  * tcp_sendmsg_locked()的主要工作是把用户层的数据，填充到skb中，然后加入到sock的发送队列。
  * 之后利用tcp_write_xmit()来把sock发送队列中的skb尽量的发送出去。
  * 另外。TCP的发送缓存的管理也主要在这个函数中
