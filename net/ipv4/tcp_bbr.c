@@ -1166,7 +1166,7 @@ static void bbr_update_model(struct sock *sk, const struct rate_sample *rs)
 	bbr_update_bw(sk, rs);             // 根据发送数据包的速度估计带宽
 	bbr_update_ack_aggregation(sk, rs);// ack聚合期间，提供额外的inflight数据
 	bbr_update_cycle_phase(sk, rs);    // 增益循环
-	bbr_check_full_bw_reached(sk, rs); // 检查管道是否已满
+	bbr_check_full_bw_reached(sk, rs); // 检查管道是否已满。只有在第一次startup情况下才会进入到此函数。bbr->full_bw_reached一旦为true 无法修改。
 	bbr_check_drain(sk, rs);    // 如果管道可能已满，则排空队列，然后进入稳定状态
 	bbr_update_min_rtt(sk, rs); // 更新最小RTT
 	bbr_update_gains(sk);
